@@ -10,4 +10,4 @@ jobs:
       build-args: |
         PYTHON_VERSION=3.12
       tags: |
-        ghcr.io/${{ github.repository }}:${{ github.ref_nam
+        ghcr.io/${{ github.repository }}:${{ github.ref_name }}
