@@ -17,7 +17,7 @@ logging.info(f"{log_level}")
 
 TEAMCITY_URL = os.environ.get("TEAMCITY_URL")
 TOKEN = os.environ.get("TEAMCITY_TOKEN")
-TEMPLATE_IDS = os.environ.get("TEAMCITY_TEMPLATE_ID", "")
+TEMPLATE_IDS = os.environ.get("TEAMCITY_TEMPLATE_IDS", "")
 TEMPLATE_IDS = [tid.strip() for tid in TEMPLATE_IDS.split(",") if tid.strip()]
 SCRAPE_INTERVAL = int(os.environ.get("SCRAPE_INTERVAL", 600))
 
