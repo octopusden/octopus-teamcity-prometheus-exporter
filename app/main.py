@@ -17,8 +17,10 @@ logging.info(f"{log_level}")
 
 TEAMCITY_URL = os.environ.get("TEAMCITY_URL")
 TOKEN = os.environ.get("TEAMCITY_TOKEN")
-TEMPLATE_ID = os.environ.get("TEAMCITY_TEMPLATE_ID")
+TEMPLATE_IDS = os.environ.get("TEAMCITY_TEMPLATE_ID", "")
+TEMPLATE_IDS = [tid.strip() for tid in TEMPLATE_IDS.split(",") if tid.strip()]
 SCRAPE_INTERVAL = int(os.environ.get("SCRAPE_INTERVAL", 600))
+
 HEADERS = {
     "Authorization": f"Bearer {TOKEN}",
     "Accept": "application/json"
@@ -27,7 +29,7 @@ HEADERS = {
 build_status_gauge = Gauge(
     "teamcity_last_build_status",
     "Last build status for build configurations from a template",
-    ["build_type_name", "build_type_id", "build_url" ]
+    ["build_type_name", "template_id","build_type_id", "build_url" ]
 )
 
 def get_build_configs_from_template(template_id):
@@ -51,24 +53,26 @@ def fetch_and_update_metrics():
     logging.debug("Reached fetch_and_update_metrics")
     while True:
         try:
-            build_configs = get_build_configs_from_template(TEMPLATE_ID)
-            for cfg in build_configs:
-                if cfg.get("paused", False):
-                    continue
-                status = get_last_build_status(cfg["id"])
-                status_value = {"SUCCESS": 1, "FAILURE": 0, "NO_BUILDS": -1}.get(status, -1)
-                build_status_gauge.labels(
-                    build_type_name=cfg["name"],
-                    build_type_id=cfg["id"],
-                    build_url=cfg["webUrl"]
-                ).set(status_value)
+            for template_id in TEMPLATE_IDS:
+                build_configs = get_build_configs_from_template(template_id)
+                for cfg in build_configs:
+                    if cfg.get("paused", False):
+                        continue
+                    status = get_last_build_status(cfg["id"])
+                    status_value = {"SUCCESS": 1, "FAILURE": 0, "NO_BUILDS": -1}.get(status, -1)
+                    build_status_gauge.labels(
+                        template_id=template_id,
+                        build_type_name=cfg["name"],
+                        build_type_id=cfg["id"],
+                        build_url=cfg["webUrl"]
+                    ).set(status_value)
         except Exception as e:
 
             logging.debug(f"Obtaining [ERROR] {e}")
         time.sleep(SCRAPE_INTERVAL)
 
 if __name__ == "__main__":
-    if not all([TEAMCITY_URL, TOKEN, TEMPLATE_ID]):
+    if not all([TEAMCITY_URL, TOKEN, TEMPLATE_IDS]):
         _error_txt = "TEAMCITY_URL, TEAMCITY_TOKEN, and TEAMCITY_TEMPLATE_ID must be set as environment variables"
         logging.info(_error_txt)
         raise EnvironmentError(_error_txt)
