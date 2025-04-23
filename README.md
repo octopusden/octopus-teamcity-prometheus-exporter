@@ -30,6 +30,7 @@ teamcity_last_build_status{
   build_url="<< build URL >>"
 } << build result >>
 ```
+
 ### Possible build result values
 
 | Value | Status               |
