@@ -24,6 +24,7 @@ The exporter outputs Prometheus metrics in the following format:
 
 ```text
 teamcity_last_build_status{
+  template_id="<< ID template name >>",
   build_type_id="<< ID of the build being checked >>",
   build_type_name="<< name of the specific build >>",
   build_url="<< build URL >>"
