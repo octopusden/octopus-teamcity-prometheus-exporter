@@ -3,6 +3,7 @@ on:
   release:
     types: [published]
 jobs:
+
   build-push-docker-image:
       uses: octopusden/octopus-base/.github/workflows/common-docker-build-deploy.yml@main
       with:
