@@ -1,9 +1,13 @@
 name: On push, deploying to Test
+
 on: [push]
+
 jobs:
-  run-build-and-deploy:
-    uses: octopusden/octopus-base/.github/workflows/common-py-build-deploy.yml@main
+
+  build-push-docker-image:
+    uses: octopusden/octopus-base/.github/workflows/common-docker-build-deploy.yml@main
     with:
-      process_env: Test
-      python_versions: "3"
-    secrets: inherit
+      build-args: |
+        PYTHON_VERSION=3.12
+      tags: |
+        ghcr.io/${{ github.repository }}:${{ github.ref_name }}
