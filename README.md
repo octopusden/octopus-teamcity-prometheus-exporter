@@ -1,6 +1,6 @@
 # octopus-teamcity-prometheus-exporter
 
-This exporter is used to retrieve the build status from **TeamCity** for builds that inherit from specific templates.
+This exporter is used to retrieve the build status from **TeamCity** for builds that inherit from specific templates and exclude paused.
 
 ## Environment Variables
 
