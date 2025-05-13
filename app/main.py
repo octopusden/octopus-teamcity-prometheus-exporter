@@ -39,6 +39,14 @@ def get_build_configs_from_template(template_id):
     resp.raise_for_status()
     return resp.json().get("buildType", [])
 
+def get_archived_projects():
+    logging.debug("Reached get_archived_projects")
+    url = f"{TEAMCITY_URL}/app/rest/projects?locator=archived:true"
+    resp = requests.get(url, headers=HEADERS)
+    resp.raise_for_status()
+    data = resp.json()
+    return [p['id'] for p in data.get('project', [])]
+
 def get_last_build_status(build_type_id):
     logging.debug("Reached get_last_build_status")
     url = f"{TEAMCITY_URL}/app/rest/builds?locator=buildType:{build_type_id},count:1"
@@ -51,12 +59,13 @@ def get_last_build_status(build_type_id):
 
 def fetch_and_update_metrics():
     logging.debug("Reached fetch_and_update_metrics")
+    archived_projects = get_archived_projects()
     while True:
         try:
             for template_id in TEMPLATE_IDS:
                 build_configs = get_build_configs_from_template(template_id)
                 for cfg in build_configs:
-                    if cfg.get("paused", False):
+                    if cfg['projectId'] in archived_projects:
                         continue
                     status = get_last_build_status(cfg["id"])
                     status_value = {"SUCCESS": 1, "FAILURE": 0, "NO_BUILDS": -1}.get(status, -1)
