@@ -34,7 +34,7 @@ build_status_gauge = Gauge(
 
 def get_build_configs_from_template(template_id):
     logging.debug("Reached get_build_configs_from_template")
-    url = f"{TEAMCITY_URL}/app/rest/buildTypes?locator=template:{template_id}"
+    url = f"{TEAMCITY_URL}/app/rest/buildTypes?locator=template:{template_id},paused:false"
     resp = requests.get(url, headers=HEADERS)
     resp.raise_for_status()
     return resp.json().get("buildType", [])
