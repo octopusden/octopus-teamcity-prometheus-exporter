@@ -34,7 +34,7 @@ build_status_gauge = Gauge(
 
 def get_build_configs_from_template(template_id):
     logging.debug("Reached get_build_configs_from_template")
-    url = f"{TEAMCITY_URL}/app/rest/buildTypes?locator=template:{template_id},paused:false"
+    url = f"{TEAMCITY_URL}/app/rest/buildTypes?locator=template:{template_id}"
     resp = requests.get(url, headers=HEADERS)
     resp.raise_for_status()
     return resp.json().get("buildType", [])
@@ -65,7 +65,7 @@ def fetch_and_update_metrics():
             for template_id in TEMPLATE_IDS:
                 build_configs = get_build_configs_from_template(template_id)
                 for cfg in build_configs:
-                    if cfg['projectId'] in archived_projects:
+                    if cfg['id'] in archived_projects or cfg.get("paused", False):
                         continue
                     status = get_last_build_status(cfg["id"])
                     status_value = {"SUCCESS": 1, "FAILURE": 0, "NO_BUILDS": -1}.get(status, -1)
