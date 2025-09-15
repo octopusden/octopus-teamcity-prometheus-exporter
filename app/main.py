@@ -87,7 +87,7 @@ def fetch_and_update_metrics():
             for template_id in TEMPLATE_IDS:
                 build_configs = get_build_configs_from_template(template_id)
                 for cfg in build_configs:
-                    if cfg['id'] in archived_projects or cfg.get("paused", False):
+                    if cfg['id'] in archived_projects:
                         continue
                     last_build = get_last_build_status(cfg["id"])
                     status = last_build['status']
