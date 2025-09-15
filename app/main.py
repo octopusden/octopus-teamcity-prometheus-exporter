@@ -2,39 +2,53 @@ import os
 import time
 import requests
 import threading
-from prometheus_client import start_http_server, Gauge
+from prometheus_client import start_http_server, Gauge, Summary
 import logging
+from datetime import datetime
+import json
 
-if os.environ.get("DEBUG_LVL"):
-    log_level = logging.DEBUG
-else:
-    log_level = logging.INFO
+def get_log_level():
+    lvl = os.environ.get("LOG_LEVEL")
+    if lvl is None:
+        return logging.INFO
+
+    if lvl.isdigit():
+        return int(lvl)
+    return getattr(logging, lvl.upper(), logging.INFO)
+
+log_level = get_log_level()
 log_format = "%(asctime)s [%(levelname)s] [%(funcName)s] %(message)s"
 logging.basicConfig(format=log_format, level=log_level)
-logging.info("Hello")
+logging.info("Start teamcity exporter")
 logging.info(f"{log_level}")
-
 
 TEAMCITY_URL = os.environ.get("TEAMCITY_URL")
 TOKEN = os.environ.get("TEAMCITY_TOKEN")
 TEMPLATE_IDS = os.environ.get("TEAMCITY_TEMPLATE_IDS", "")
 TEMPLATE_IDS = [tid.strip() for tid in TEMPLATE_IDS.split(",") if tid.strip()]
-SCRAPE_INTERVAL = int(os.environ.get("SCRAPE_INTERVAL", 600))
+SCRAPE_INTERVAL = int(os.environ.get("SCRAPE_INTERVAL", 6000))
+METRICS_PORT = int(os.getenv("METRICS_PORT", "8000"))
 
 HEADERS = {
     "Authorization": f"Bearer {TOKEN}",
     "Accept": "application/json"
 }
 
-build_status_gauge = Gauge(
+BUILD_STATUS_GAUGE = Gauge(
     "teamcity_last_build_status",
     "Last build status for build configurations from a template",
     ["build_type_name", "template_id","build_type_id", "build_url" ]
 )
 
+BUILD_DURATION = Summary(
+    "teamcity_last_build_duration_seconds",
+    "TeamCity build duration in seconds (observed once per SUCCESS build).",
+    ["build_type_name", "template_id","build_type_id", "build_url"
+)
+
 def get_build_configs_from_template(template_id):
     logging.debug("Reached get_build_configs_from_template")
-    url = f"{TEAMCITY_URL}/app/rest/buildTypes?locator=template:{template_id}"
+    url = f"{TEAMCITY_URL}/app/rest/buildTypes?locator=template:{template_id},paused:false"
     resp = requests.get(url, headers=HEADERS)
     resp.raise_for_status()
     return resp.json().get("buildType", [])
@@ -49,13 +63,21 @@ def get_archived_projects():
 
 def get_last_build_status(build_type_id):
     logging.debug("Reached get_last_build_status")
-    url = f"{TEAMCITY_URL}/app/rest/builds?locator=buildType:{build_type_id},count:1"
+    url = f"{TEAMCITY_URL}/app/rest/builds?locator=buildType:{build_type_id},count:1&fields=build(id,number,startDate,finishDate,status,buildTypeId,webUrl,taskId,state,composite)"
     resp = requests.get(url, headers=HEADERS)
     resp.raise_for_status()
-    builds = resp.json().get("build", [])
-    if builds:
-        return builds[0]["status"]
-    return "NO_BUILDS"
+    last_build = resp.json().get("build")
+    if not last_build:
+        return {'status': 'NO_BUILDS'}
+    return last_build[0]
+
+
+def build_duration_seconds(build):
+    fmt = "%Y%m%dT%H%M%S%z"
+    start = datetime.strptime(build['startDate'], fmt)
+    finish = datetime.strptime(build['finishDate'], fmt)
+    delta = finish - start
+    return int(delta.total_seconds())
 
 def fetch_and_update_metrics():
     logging.debug("Reached fetch_and_update_metrics")
@@ -65,11 +87,20 @@ def fetch_and_update_metrics():
             for template_id in TEMPLATE_IDS:
                 build_configs = get_build_configs_from_template(template_id)
                 for cfg in build_configs:
-                    if cfg['id'] in archived_projects or cfg.get("paused", False):
+                    if cfg['id'] in archived_projects:
                         continue
-                    status = get_last_build_status(cfg["id"])
+                    last_build = get_last_build_status(cfg["id"])
+                    status = last_build['status']
                     status_value = {"SUCCESS": 1, "FAILURE": 0, "NO_BUILDS": -1}.get(status, -1)
-                    build_status_gauge.labels(
+                    if status == 'SUCCESS':
+                        duration = build_duration_seconds(last_build)
+                        BUILD_DURATION.labels(
+                            template_id=template_id,
+                            build_type_name=cfg["name"],
+                            build_type_id=cfg["id"],
+                            build_url=cfg["webUrl"]).observe(duration)
+
+                    BUILD_STATUS_GAUGE.labels(
                         template_id=template_id,
                         build_type_name=cfg["name"],
                         build_type_id=cfg["id"],
@@ -82,11 +113,11 @@ def fetch_and_update_metrics():
 
 if __name__ == "__main__":
     if not all([TEAMCITY_URL, TOKEN, TEMPLATE_IDS]):
-        _error_txt = "TEAMCITY_URL, TEAMCITY_TOKEN, and TEAMCITY_TEMPLATE_ID must be set as environment variables"
+        _error_txt = "TEAMCITY_URL, TEAMCITY_TOKEN, and TEAMCITY_TEMPLATE_IDS must be set as environment variables"
         logging.info(_error_txt)
         raise EnvironmentError(_error_txt)
 
-    start_http_server(8000)
-    logging.info("Prometheus metrics server running on :8000/metrics")
+    start_http_server(METRICS_PORT)
+    logging.info(f"Prometheus metrics server running on :{METRICS_PORT}/metrics")
     thread = threading.Thread(target=fetch_and_update_metrics)
     thread.start()
