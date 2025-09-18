@@ -43,7 +43,7 @@ BUILD_STATUS_GAUGE = Gauge(
 BUILD_DURATION = Summary(
     "teamcity_last_build_duration_seconds",
     "TeamCity build duration in seconds (observed once per SUCCESS build).",
-    ["build_type_name", "template_id","build_type_id", "build_url"
+    ["build_type_name", "template_id","build_type_id", "build_url" ]
 )
 
 def get_build_configs_from_template(template_id):

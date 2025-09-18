@@ -14,9 +14,11 @@ The following environment variables **must** be set when running the exporter:
 
 Optional:
 
-| Variable        | Description                            |
-|-----------------|----------------------------------------|
-| `DEBUG_LVL`     | Set to `True` to enable debug logging  |
+| Variable        | Description                                                      |
+|-----------------|------------------------------------------------------------------|
+| `LOG_LEVEL`     | Set needed level for logging (number or name), default INFO (20) |
+| `METRICS_PORT`     | Set needed port for scrape metrics. default 8000                 |
+| `SCRAPE_INTERVAL`     | Set needed interval scrape. default 6000                         |
 
 ## Metric Format
 
