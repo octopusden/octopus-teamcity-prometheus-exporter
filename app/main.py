@@ -143,7 +143,7 @@ def fetch_and_update_metrics():
                     projectId=k,
                     project_url=v["project_url"],
                     project_name=v["project_name"]
-                ).set(v['duration'])
+                ).set(v['project_duration'])
         except Exception as e:
 
             logging.debug(f"Obtaining [ERROR] {e}")
