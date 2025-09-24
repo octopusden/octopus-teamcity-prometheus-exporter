@@ -101,9 +101,10 @@ def get_project_url(projectid):
 
 def fetch_and_update_metrics():
     logging.debug("Reached fetch_and_update_metrics")
-    all_projects = {}
+
     while True:
         archived_projects = get_archived_projects()
+        all_projects = {}
         try:
             for template_id in TEMPLATE_IDS:
                 build_configs = get_build_configs_from_template(template_id)
