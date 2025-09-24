@@ -7,6 +7,7 @@ import logging
 from datetime import datetime
 import json
 
+
 def get_log_level():
     lvl = os.environ.get("LOG_LEVEL")
     if lvl is None:
@@ -15,6 +16,7 @@ def get_log_level():
     if lvl.isdigit():
         return int(lvl)
     return getattr(logging, lvl.upper(), logging.INFO)
+
 
 log_level = get_log_level()
 log_format = "%(asctime)s [%(levelname)s] [%(funcName)s] %(message)s"
@@ -37,14 +39,21 @@ HEADERS = {
 BUILD_STATUS_GAUGE = Gauge(
     "teamcity_last_build_status",
     "Last build status for build configurations from a template",
-    ["build_type_name", "template_id","build_type_id", "build_url" ]
+    ["build_type_name", "template_id", "build_type_id", "build_url"]
 )
 
-BUILD_DURATION = Summary(
+BUILD_DURATION_GAUGE = Gauge(
     "teamcity_last_build_duration_seconds",
-    "TeamCity build duration in seconds (observed once per SUCCESS build).",
-    ["build_type_name", "template_id","build_type_id", "build_url" ]
+    "TeamCity last SUCCESS build duration in seconds",
+    ["build_type_name", "template_id", "build_type_id", "build_url"]
 )
+
+PROJECT_DURATION_GAUGE = Gauge(
+    "teamcity_project_duration_seconds",
+    "TeamCity project duration in seconds",
+    ["projectId", "project_url", "project_name"]
+)
+
 
 def get_build_configs_from_template(template_id):
     logging.debug("Reached get_build_configs_from_template")
@@ -53,6 +62,7 @@ def get_build_configs_from_template(template_id):
     resp.raise_for_status()
     return resp.json().get("buildType", [])
 
+
 def get_archived_projects():
     logging.debug("Reached get_archived_projects")
     url = f"{TEAMCITY_URL}/app/rest/projects?locator=archived:true"
@@ -60,6 +70,7 @@ def get_archived_projects():
     resp.raise_for_status()
     data = resp.json()
     return [p['id'] for p in data.get('project', [])]
+
 
 def get_last_build_status(build_type_id):
     logging.debug("Reached get_last_build_status")
@@ -79,10 +90,20 @@ def build_duration_seconds(build):
     delta = finish - start
     return int(delta.total_seconds())
 
+
+def get_project_url(projectid):
+    logging.debug("Reached get_project_url")
+    url = f"{TEAMCITY_URL}/app/rest/projects/id:{projectid}"
+    resp = requests.get(url, headers=HEADERS)
+    resp.raise_for_status()
+    return resp.json().get("webUrl")
+
+
 def fetch_and_update_metrics():
     logging.debug("Reached fetch_and_update_metrics")
-    archived_projects = get_archived_projects()
+    all_projects = {}
     while True:
+        archived_projects = get_archived_projects()
         try:
             for template_id in TEMPLATE_IDS:
                 build_configs = get_build_configs_from_template(template_id)
@@ -92,13 +113,22 @@ def fetch_and_update_metrics():
                     last_build = get_last_build_status(cfg["id"])
                     status = last_build['status']
                     status_value = {"SUCCESS": 1, "FAILURE": 0, "NO_BUILDS": -1}.get(status, -1)
+                    current_project_id = cfg['projectId']
+                    project_from_all_project = all_projects.get(current_project_id)
+                    if not project_from_all_project:
+                        current_project_url = get_project_url(current_project_id)
+                        all_projects[current_project_id] = {"project_duration": 0,
+                                                            "project_name": cfg["projectName"],
+                                                            "project_url": current_project_url}
+                    project_from_all_project = all_projects.get(current_project_id)
                     if status == 'SUCCESS':
                         duration = build_duration_seconds(last_build)
-                        BUILD_DURATION.labels(
+                        project_from_all_project['project_duration'] += duration
+                        BUILD_DURATION_GAUGE.labels(
                             template_id=template_id,
                             build_type_name=cfg["name"],
                             build_type_id=cfg["id"],
-                            build_url=cfg["webUrl"]).observe(duration)
+                            build_url=cfg["webUrl"]).set(duration)
 
                     BUILD_STATUS_GAUGE.labels(
                         template_id=template_id,
@@ -106,10 +136,18 @@ def fetch_and_update_metrics():
                         build_type_id=cfg["id"],
                         build_url=cfg["webUrl"]
                     ).set(status_value)
+
+            for k,v in all_projects.items():
+                PROJECT_DURATION_GAUGE.labels(
+                    projectId=k,
+                    project_url=v["project_url"],
+                    project_name=v["project_name"]
+                ).set(v['duration'])
         except Exception as e:
 
             logging.debug(f"Obtaining [ERROR] {e}")
         time.sleep(SCRAPE_INTERVAL)
+
 
 if __name__ == "__main__":
     if not all([TEAMCITY_URL, TOKEN, TEMPLATE_IDS]):
