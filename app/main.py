@@ -9,6 +9,14 @@ import json
 
 
 def get_log_level():
+    """
+    Determine the logging level to use based on the LOG_LEVEL environment variable.
+    
+    If LOG_LEVEL is unset, returns logging.INFO. If LOG_LEVEL is a numeric string, the numeric value is returned as an int. If LOG_LEVEL is a named level (e.g. "debug", "WARNING"), the corresponding attribute from the logging module is returned; if the name is unrecognized, logging.INFO is returned.
+    
+    Returns:
+        int: The resolved logging level value.
+    """
     lvl = os.environ.get("LOG_LEVEL")
     if lvl is None:
         return logging.INFO
@@ -56,6 +64,18 @@ PROJECT_DURATION_GAUGE = Gauge(
 
 
 def get_build_configs_from_template(template_id):
+    """
+    Retrieve build configurations associated with a TeamCity template that are not paused.
+    
+    Parameters:
+        template_id (str): TeamCity template identifier to query.
+    
+    Returns:
+        list: List of build configuration objects from the TeamCity API; empty list if none are found.
+    
+    Raises:
+        requests.HTTPError: If the HTTP request to the TeamCity API fails.
+    """
     logging.debug("Reached get_build_configs_from_template")
     url = f"{TEAMCITY_URL}/app/rest/buildTypes?locator=template:{template_id},paused:false"
     resp = requests.get(url, headers=HEADERS)
@@ -64,6 +84,14 @@ def get_build_configs_from_template(template_id):
 
 
 def get_archived_projects():
+    """
+    Return archived TeamCity project IDs.
+    
+    Fetches archived projects from the TeamCity REST API and returns a list of their IDs.
+    
+    Returns:
+        list[str]: Project IDs marked as archived (empty list if no archived projects).
+    """
     logging.debug("Reached get_archived_projects")
     url = f"{TEAMCITY_URL}/app/rest/projects?locator=archived:true"
     resp = requests.get(url, headers=HEADERS)
@@ -73,6 +101,18 @@ def get_archived_projects():
 
 
 def get_last_build_status(build_type_id):
+    """
+    Fetches the most recent build for a TeamCity build configuration.
+    
+    Parameters:
+        build_type_id (str): TeamCity build configuration (build type) identifier.
+    
+    Returns:
+        dict: The most-recent build object as returned by the TeamCity API, or `{'status': 'NO_BUILDS'}` if no builds exist.
+    
+    Raises:
+        requests.HTTPError: If the HTTP request to the TeamCity API returns an error status.
+    """
     logging.debug("Reached get_last_build_status")
     url = f"{TEAMCITY_URL}/app/rest/builds?locator=buildType:{build_type_id},count:1&fields=build(id,number,startDate,finishDate,status,buildTypeId,webUrl,taskId,state,composite)"
     resp = requests.get(url, headers=HEADERS)
@@ -84,6 +124,15 @@ def get_last_build_status(build_type_id):
 
 
 def build_duration_seconds(build):
+    """
+    Compute the duration in seconds between a build's start and finish timestamps.
+    
+    Parameters:
+        build (dict): Build dictionary containing 'startDate' and 'finishDate' as strings in the format "%Y%m%dT%H%M%S%z" (e.g., 20240102T150405+0000).
+    
+    Returns:
+        int: Number of seconds between finish and start timestamps.
+    """
     fmt = "%Y%m%dT%H%M%S%z"
     start = datetime.strptime(build['startDate'], fmt)
     finish = datetime.strptime(build['finishDate'], fmt)
@@ -92,6 +141,18 @@ def build_duration_seconds(build):
 
 
 def get_project_url(projectid):
+    """
+    Fetches the TeamCity project's web URL for the given project ID.
+    
+    Parameters:
+        projectid (str): TeamCity project identifier (project id as used by the REST API).
+    
+    Returns:
+        str or None: The project's `webUrl` as reported by TeamCity, or `None` if the field is absent.
+    
+    Raises:
+        requests.HTTPError: If the HTTP request to TeamCity returns a non-success status.
+    """
     logging.debug("Reached get_project_url")
     url = f"{TEAMCITY_URL}/app/rest/projects/id:{projectid}"
     resp = requests.get(url, headers=HEADERS)
@@ -100,6 +161,11 @@ def get_project_url(projectid):
 
 
 def fetch_and_update_metrics():
+    """
+    Continuously polls TeamCity and updates Prometheus gauges for build and project durations and build statuses.
+    
+    Periodically (every SCRAPE_INTERVAL seconds) retrieves build configurations for TEMPLATE_IDS, ignores archived projects, reads each configuration's most recent build status, updates BUILD_STATUS_GAUGE for each build configuration, accumulates durations of successful builds per project and updates BUILD_DURATION_GAUGE for the last successful build and PROJECT_DURATION_GAUGE for the project's cumulative duration. This function runs indefinitely and performs network requests to TeamCity during each cycle.
+    """
     logging.debug("Reached fetch_and_update_metrics")
 
     while True:
