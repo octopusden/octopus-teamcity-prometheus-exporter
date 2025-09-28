@@ -136,6 +136,8 @@ def build_duration_seconds(build):
     fmt = "%Y%m%dT%H%M%S%z"
     start = datetime.strptime(build['startDate'], fmt)
     finish = datetime.strptime(build['finishDate'], fmt)
+    if start == '' or finish == '':
+        return None
     delta = finish - start
     return int(delta.total_seconds())
 
@@ -184,13 +186,17 @@ def fetch_and_update_metrics():
                     project_from_all_project = all_projects.get(current_project_id)
                     if not project_from_all_project:
                         current_project_url = get_project_url(current_project_id)
-                        all_projects[current_project_id] = {"project_duration": 0,
+                        all_projects[current_project_id] = {"startDate": "",
+                                                            "finishDate": "",
                                                             "project_name": cfg["projectName"],
                                                             "project_url": current_project_url}
                     project_from_all_project = all_projects.get(current_project_id)
                     if status == 'SUCCESS':
                         duration = build_duration_seconds(last_build)
-                        project_from_all_project['project_duration'] += duration
+                        if template_id in ["CDGradleBuild", "CDJavaMavenBuild"]:
+                            project_from_all_project["startDate"] = last_build["startDate"]
+                        elif template_id in ["CDRelease"]:
+                            project_from_all_project["finishDate"] = last_build["finishDate"]
                         BUILD_DURATION_GAUGE.labels(
                             template_id=template_id,
                             build_type_name=cfg["name"],
@@ -205,11 +211,13 @@ def fetch_and_update_metrics():
                     ).set(status_value)
 
             for k,v in all_projects.items():
-                PROJECT_DURATION_GAUGE.labels(
-                    projectId=k,
-                    project_url=v["project_url"],
-                    project_name=v["project_name"]
-                ).set(v['project_duration'])
+                full_duration = build_duration_seconds(v)
+                if full_duration:
+                    PROJECT_DURATION_GAUGE.labels(
+                        projectId=k,
+                        project_url=v["project_url"],
+                        project_name=v["project_name"]
+                    ).set(full_duration)
         except Exception as e:
 
             logging.debug(f"Obtaining [ERROR] {e}")
