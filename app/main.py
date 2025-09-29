@@ -133,11 +133,14 @@ def build_duration_seconds(build):
     Returns:
         int: Number of seconds between finish and start timestamps.
     """
-    fmt = "%Y%m%dT%H%M%S%z"
-    start = datetime.strptime(build['startDate'], fmt)
-    finish = datetime.strptime(build['finishDate'], fmt)
-    if start == '' or finish == '':
+    start_raw = build['startDate']
+    finish_raw = build['finishDate']
+    if start_raw == '' or finish_raw == '':
         return None
+    fmt = "%Y%m%dT%H%M%S%z"
+    start = datetime.strptime(start_raw, fmt)
+    finish = datetime.strptime(finish_raw, fmt)
+
     delta = finish - start
     return int(delta.total_seconds())
 
