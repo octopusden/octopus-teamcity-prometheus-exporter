@@ -36,6 +36,10 @@ TEAMCITY_URL = os.environ.get("TEAMCITY_URL")
 TOKEN = os.environ.get("TEAMCITY_TOKEN")
 TEMPLATE_IDS = os.environ.get("TEAMCITY_TEMPLATE_IDS", "")
 TEMPLATE_IDS = [tid.strip() for tid in TEMPLATE_IDS.split(",") if tid.strip()]
+START_PROJECT_CHAIN = os.environ.get("START_PROJECT_CHAIN", "")
+START_PROJECT_CHAIN = [tid.strip() for tid in START_PROJECT_CHAIN.split(",") if tid.strip()]
+STOP_PROJECT_CHAIN = os.environ.get("STOP_PROJECT_CHAIN", "")
+STOP_PROJECT_CHAIN = [tid.strip() for tid in STOP_PROJECT_CHAIN.split(",") if tid.strip()]
 SCRAPE_INTERVAL = int(os.environ.get("SCRAPE_INTERVAL", 6000))
 METRICS_PORT = int(os.getenv("METRICS_PORT", "8000"))
 
@@ -196,9 +200,9 @@ def fetch_and_update_metrics():
                     project_from_all_project = all_projects.get(current_project_id)
                     if status == 'SUCCESS':
                         duration = build_duration_seconds(last_build)
-                        if template_id in ["CDGradleBuild", "CDJavaMavenBuild"]:
+                        if template_id in START_PROJECT_CHAIN:
                             project_from_all_project["startDate"] = last_build["startDate"]
-                        elif template_id in ["CDRelease"]:
+                        elif template_id in STOP_PROJECT_CHAIN:
                             project_from_all_project["finishDate"] = last_build["finishDate"]
                         BUILD_DURATION_GAUGE.labels(
                             template_id=template_id,
