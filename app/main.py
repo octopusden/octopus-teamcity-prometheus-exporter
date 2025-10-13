@@ -66,6 +66,7 @@ PROJECT_DURATION_GAUGE = Gauge(
     ["projectId", "project_url", "project_name", "finished_number"]
 )
 
+
 def _tc_get_json(path, params=None, timeout=30):
     """
     Fetch JSON from the TeamCity REST API at the given path and return the parsed response.
@@ -86,6 +87,7 @@ def _tc_get_json(path, params=None, timeout=30):
     r = requests.get(url, headers=HEADERS, params=params, timeout=timeout)
     r.raise_for_status()
     return r.json()
+
 
 def get_build_configs_from_template(template_id):
     """
@@ -192,7 +194,6 @@ def get_project_url(projectid):
 
 
 def get_upstream_chain_nodes(build_id):
-
     """
     Retrieve upstream snapshot-dependency build nodes for the specified build.
     
@@ -223,11 +224,12 @@ def get_template_names_for_build_type_id(build_type_id):
     """
     js = _tc_get_json(f"/app/rest/buildTypes/id:{build_type_id}",
                       params={"fields": "templates(buildType)"})
-    templates_list = js.get('templates', {"buildType":[]})
+    templates_list = js.get('templates', {"buildType": []})
     for each_template in templates_list['buildType']:
         if each_template.get('id') in START_PROJECT_CHAIN:
             return each_template.get('id')
     return None
+
 
 def get_start_date_by_last_build_id(build_id):
     """
@@ -247,6 +249,7 @@ def get_start_date_by_last_build_id(build_id):
         else:
             return each_dependencies['startDate']
     return None
+
 
 def fetch_and_update_metrics():
     """
@@ -273,12 +276,13 @@ def fetch_and_update_metrics():
                     if status == 'SUCCESS':
                         duration = build_duration_seconds(last_build)
                         if template_id in STOP_PROJECT_CHAIN:
-                            all_projects[current_project_id] = {"startDate": get_start_date_by_last_build_id(last_build['id']),
-                                                                "finishDate": last_build["finishDate"],
-                                                                "project_name": cfg["projectName"],
-                                                                "project_url": get_project_url(current_project_id),
-                                                                "finished_number": last_build["number"],
-                                                                "finish_build_id": last_build["id"]}
+                            all_projects[current_project_id] = {
+                                "startDate": get_start_date_by_last_build_id(last_build['id']),
+                                "finishDate": last_build["finishDate"],
+                                "project_name": cfg["projectName"],
+                                "project_url": get_project_url(current_project_id),
+                                "finished_number": last_build["number"],
+                                "finish_build_id": last_build["id"]}
                         BUILD_DURATION_GAUGE.labels(
                             template_id=template_id,
                             build_type_name=cfg["name"],
@@ -295,12 +299,13 @@ def fetch_and_update_metrics():
             for k, v in all_projects.items():
                 if v['startDate']:
                     full_duration = build_duration_seconds(v)
-                    PROJECT_DURATION_GAUGE.labels(
-                        projectId=k,
-                        project_url=v["project_url"],
-                        project_name=v["project_name"],
-                        finished_number=v['finished_number']
-                    ).set(full_duration)
+                    if full_duration:
+                        PROJECT_DURATION_GAUGE.labels(
+                            projectId=k,
+                            project_url=v["project_url"],
+                            project_name=v["project_name"],
+                            finished_number=v['finished_number']
+                            ).set(full_duration)
         except Exception as e:
 
             logging.debug(f"Obtaining [ERROR] {e}")
