@@ -11,9 +11,9 @@ import json
 def get_log_level():
     """
     Determine the logging level to use based on the LOG_LEVEL environment variable.
-    
+
     If LOG_LEVEL is unset, returns logging.INFO. If LOG_LEVEL is a numeric string, the numeric value is returned as an int. If LOG_LEVEL is a named level (e.g. "debug", "WARNING"), the corresponding attribute from the logging module is returned; if the name is unrecognized, logging.INFO is returned.
-    
+
     Returns:
         int: The resolved logging level value.
     """
@@ -40,7 +40,7 @@ START_PROJECT_CHAIN = os.environ.get("START_PROJECT_CHAIN", "")
 START_PROJECT_CHAIN = [tid.strip() for tid in START_PROJECT_CHAIN.split(",") if tid.strip()]
 STOP_PROJECT_CHAIN = os.environ.get("STOP_PROJECT_CHAIN", "")
 STOP_PROJECT_CHAIN = [tid.strip() for tid in STOP_PROJECT_CHAIN.split(",") if tid.strip()]
-SCRAPE_INTERVAL = int(os.environ.get("SCRAPE_INTERVAL", 6000))
+SCRAPE_INTERVAL = int(os.environ.get("SCRAPE_INTERVAL", 84600))
 METRICS_PORT = int(os.getenv("METRICS_PORT", "8000"))
 
 HEADERS = {
@@ -63,65 +63,74 @@ BUILD_DURATION_GAUGE = Gauge(
 PROJECT_DURATION_GAUGE = Gauge(
     "teamcity_project_duration_seconds",
     "TeamCity project duration in seconds",
-    ["projectId", "project_url", "project_name"]
+    ["projectId", "project_url", "project_name", "finished_number"]
 )
 
+def _tc_get_json(path, params=None, timeout=30):
+    url = f"{TEAMCITY_URL.rstrip('/')}{path}"
+    r = requests.get(url, headers=HEADERS, params=params, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
 
 def get_build_configs_from_template(template_id):
     """
     Retrieve build configurations associated with a TeamCity template that are not paused.
-    
+
     Parameters:
         template_id (str): TeamCity template identifier to query.
-    
+
     Returns:
         list: List of build configuration objects from the TeamCity API; empty list if none are found.
-    
+
     Raises:
         requests.HTTPError: If the HTTP request to the TeamCity API fails.
     """
     logging.debug("Reached get_build_configs_from_template")
-    url = f"{TEAMCITY_URL}/app/rest/buildTypes?locator=template:{template_id},paused:false"
-    resp = requests.get(url, headers=HEADERS)
-    resp.raise_for_status()
-    return resp.json().get("buildType", [])
+
+    locator = f"template:{template_id},paused:false"
+    data = _tc_get_json("/app/rest/buildTypes", params={
+        "locator": locator
+    })
+    return data.get("buildType", [])
 
 
 def get_archived_projects():
     """
     Return archived TeamCity project IDs.
-    
+
     Fetches archived projects from the TeamCity REST API and returns a list of their IDs.
-    
+
     Returns:
         list[str]: Project IDs marked as archived (empty list if no archived projects).
     """
     logging.debug("Reached get_archived_projects")
-    url = f"{TEAMCITY_URL}/app/rest/projects?locator=archived:true"
-    resp = requests.get(url, headers=HEADERS)
-    resp.raise_for_status()
-    data = resp.json()
+    locator = f"archived:true"
+    data = _tc_get_json("/app/rest/projects", params={
+        "locator": locator
+    })
     return [p['id'] for p in data.get('project', [])]
 
 
 def get_last_build_status(build_type_id):
     """
     Fetches the most recent build for a TeamCity build configuration.
-    
+
     Parameters:
         build_type_id (str): TeamCity build configuration (build type) identifier.
-    
+
     Returns:
         dict: The most-recent build object as returned by the TeamCity API, or `{'status': 'NO_BUILDS'}` if no builds exist.
-    
+
     Raises:
         requests.HTTPError: If the HTTP request to the TeamCity API returns an error status.
     """
     logging.debug("Reached get_last_build_status")
-    url = f"{TEAMCITY_URL}/app/rest/builds?locator=buildType:{build_type_id},count:1&fields=build(id,number,startDate,finishDate,status,buildTypeId,webUrl,taskId,state,composite)"
-    resp = requests.get(url, headers=HEADERS)
-    resp.raise_for_status()
-    last_build = resp.json().get("build")
+    locator = f"buildType:{build_type_id},count:1"
+    data = _tc_get_json("/app/rest/builds", params={
+        "locator": locator,
+        "fields": "build(id,number,startDate,finishDate,status,buildTypeId,webUrl,taskId,state,composite)"
+    })
+    last_build = data.get("build")
     if not last_build:
         return {'status': 'NO_BUILDS'}
     return last_build[0]
@@ -130,16 +139,16 @@ def get_last_build_status(build_type_id):
 def build_duration_seconds(build):
     """
     Compute the duration in seconds between a build's start and finish timestamps.
-    
+
     Parameters:
         build (dict): Build dictionary containing 'startDate' and 'finishDate' as strings in the format "%Y%m%dT%H%M%S%z" (e.g., 20240102T150405+0000).
-    
+
     Returns:
         int: Number of seconds between finish and start timestamps.
     """
-    start_raw = build['startDate']
-    finish_raw = build['finishDate']
-    if start_raw == '' or finish_raw == '':
+    start_raw = build.get('startDate')
+    finish_raw = build.get('finishDate')
+    if not start_raw or not finish_raw:
         return None
     fmt = "%Y%m%dT%H%M%S%z"
     start = datetime.strptime(start_raw, fmt)
@@ -152,27 +161,55 @@ def build_duration_seconds(build):
 def get_project_url(projectid):
     """
     Fetches the TeamCity project's web URL for the given project ID.
-    
+
     Parameters:
         projectid (str): TeamCity project identifier (project id as used by the REST API).
-    
+
     Returns:
         str or None: The project's `webUrl` as reported by TeamCity, or `None` if the field is absent.
-    
+
     Raises:
         requests.HTTPError: If the HTTP request to TeamCity returns a non-success status.
     """
     logging.debug("Reached get_project_url")
-    url = f"{TEAMCITY_URL}/app/rest/projects/id:{projectid}"
-    resp = requests.get(url, headers=HEADERS)
-    resp.raise_for_status()
-    return resp.json().get("webUrl")
+    data = _tc_get_json(f"/app/rest/projects/id:{projectid}", params={})
+    return data.get("webUrl")
 
+
+def get_upstream_chain_nodes(build_id):
+
+    locator = f"snapshotDependency:(to:(id:{build_id})),defaultFilter:false"
+    data = _tc_get_json("/app/rest/builds", params={
+        "locator": locator,
+        "fields": "build(buildTypeId,id,number,startDate,finishDate,status)"
+    })
+
+    return data.get("build")
+
+
+def get_template_names_for_build_type_id(build_type_id):
+    js = _tc_get_json(f"/app/rest/buildTypes/id:{build_type_id}",
+                      params={"fields": "templates(buildType)"})
+    templates_list = js.get('templates', {"buildType":[]})
+    for each_template in templates_list['buildType']:
+        if each_template.get('id') in START_PROJECT_CHAIN:
+            return each_template.get('id')
+    return None
+
+def get_start_date_by_last_build_id(build_id):
+    nodes = get_upstream_chain_nodes(build_id)
+    for each_dependencies in nodes:
+        template_name = get_template_names_for_build_type_id(each_dependencies['buildTypeId'])
+        if not template_name:
+            continue
+        else:
+            return each_dependencies['startDate']
+    return None
 
 def fetch_and_update_metrics():
     """
     Continuously polls TeamCity and updates Prometheus gauges for build and project durations and build statuses.
-    
+
     Periodically (every SCRAPE_INTERVAL seconds) retrieves build configurations for TEMPLATE_IDS, ignores archived projects, reads each configuration's most recent build status, updates BUILD_STATUS_GAUGE for each build configuration, accumulates durations of successful builds per project and updates BUILD_DURATION_GAUGE for the last successful build and PROJECT_DURATION_GAUGE for the project's cumulative duration. This function runs indefinitely and performs network requests to TeamCity during each cycle.
     """
     logging.debug("Reached fetch_and_update_metrics")
@@ -183,27 +220,23 @@ def fetch_and_update_metrics():
         try:
             for template_id in TEMPLATE_IDS:
                 build_configs = get_build_configs_from_template(template_id)
+
                 for cfg in build_configs:
-                    if cfg['id'] in archived_projects:
+                    if cfg['projectId'] in archived_projects:
                         continue
                     last_build = get_last_build_status(cfg["id"])
                     status = last_build['status']
                     status_value = {"SUCCESS": 1, "FAILURE": 0, "NO_BUILDS": -1}.get(status, -1)
                     current_project_id = cfg['projectId']
-                    project_from_all_project = all_projects.get(current_project_id)
-                    if not project_from_all_project:
-                        current_project_url = get_project_url(current_project_id)
-                        all_projects[current_project_id] = {"startDate": "",
-                                                            "finishDate": "",
-                                                            "project_name": cfg["projectName"],
-                                                            "project_url": current_project_url}
-                    project_from_all_project = all_projects.get(current_project_id)
                     if status == 'SUCCESS':
                         duration = build_duration_seconds(last_build)
-                        if template_id in START_PROJECT_CHAIN:
-                            project_from_all_project["startDate"] = last_build["startDate"]
-                        elif template_id in STOP_PROJECT_CHAIN:
-                            project_from_all_project["finishDate"] = last_build["finishDate"]
+                        if template_id in STOP_PROJECT_CHAIN:
+                            all_projects[current_project_id] = {"startDate": get_start_date_by_last_build_id(last_build['id']),
+                                                                "finishDate": last_build["finishDate"],
+                                                                "project_name": cfg["projectName"],
+                                                                "project_url": get_project_url(current_project_id),
+                                                                "finished_number": last_build["number"],
+                                                                "finish_build_id": last_build["id"]}
                         BUILD_DURATION_GAUGE.labels(
                             template_id=template_id,
                             build_type_name=cfg["name"],
@@ -217,13 +250,14 @@ def fetch_and_update_metrics():
                         build_url=cfg["webUrl"]
                     ).set(status_value)
 
-            for k,v in all_projects.items():
-                full_duration = build_duration_seconds(v)
-                if full_duration:
+            for k, v in all_projects.items():
+                if v['startDate']:
+                    full_duration = build_duration_seconds(v)
                     PROJECT_DURATION_GAUGE.labels(
                         projectId=k,
                         project_url=v["project_url"],
-                        project_name=v["project_name"]
+                        project_name=v["project_name"],
+                        finished_number=v['finished_number']
                     ).set(full_duration)
         except Exception as e:
 
@@ -236,7 +270,6 @@ if __name__ == "__main__":
         _error_txt = "TEAMCITY_URL, TEAMCITY_TOKEN, and TEAMCITY_TEMPLATE_IDS must be set as environment variables"
         logging.info(_error_txt)
         raise EnvironmentError(_error_txt)
-
     start_http_server(METRICS_PORT)
     logging.info(f"Prometheus metrics server running on :{METRICS_PORT}/metrics")
     thread = threading.Thread(target=fetch_and_update_metrics)
