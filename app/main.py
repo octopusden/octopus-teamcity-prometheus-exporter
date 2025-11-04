@@ -11,9 +11,9 @@ import json
 def get_log_level():
     """
     Resolve the numeric logging level from the LOG_LEVEL environment variable.
-    
+
     If LOG_LEVEL is unset, returns logging.INFO. If LOG_LEVEL is a decimal numeric string, returns its int value. If LOG_LEVEL is a named level (e.g. "debug", "WARNING"), returns the corresponding attribute from the logging module; if the name is unrecognized, returns logging.INFO.
-    
+
     Returns:
         int: The resolved logging level value (e.g. logging.INFO).
     """
@@ -66,19 +66,30 @@ PROJECT_DURATION_GAUGE = Gauge(
     ["projectId", "project_url", "project_name", "finished_number"]
 )
 
+TOTAL_BUILD_CONFIGS_GAUGE = Gauge(
+    "teamcity_total_build_configurations",
+    "Total number of build configurations in TeamCity"
+)
+
+JDK_BUILD_CONFIGS_GAUGE = Gauge(
+    "teamcity_jdk_build_configurations",
+    "Number of build configurations per JDK version",
+    ["jdk_version"]
+)
+
 
 def _tc_get_json(path, params=None, timeout=30):
     """
     Fetch JSON from the TeamCity REST API at the given path and return the parsed response.
-    
+
     Parameters:
         path (str): API path appended to the configured TeamCity base URL (e.g. "/app/rest/builds").
         params (dict|None): Query parameters to include in the request.
         timeout (int|float): Request timeout in seconds.
-    
+
     Returns:
         The parsed JSON response (typically a dict or list).
-    
+
     Raises:
         requests.HTTPError: If the HTTP response status indicates an error.
         requests.RequestException: For other request-related errors (connection, timeout, etc.).
@@ -114,9 +125,9 @@ def get_build_configs_from_template(template_id):
 def get_archived_projects():
     """
     Retrieve archived TeamCity project IDs.
-    
+
     Queries TeamCity for projects marked as archived and returns their IDs.
-    
+
     Returns:
         list[str]: List of archived project IDs (empty list if none).
     """
@@ -156,10 +167,10 @@ def get_last_build_status(build_type_id):
 def build_duration_seconds(build):
     """
     Compute the duration in seconds between a build's start and finish timestamps.
-    
+
     Parameters:
         build (dict): Build object containing 'startDate' and 'finishDate' timestamp strings in the format "%Y%m%dT%H%M%S%z" (example: "20240102T150405+0000").
-    
+
     Returns:
         int or None: Number of seconds from start to finish, or `None` if either timestamp is missing.
     """
@@ -178,13 +189,13 @@ def build_duration_seconds(build):
 def get_project_url(projectid):
     """
     Get the TeamCity project's web URL for the given project ID.
-    
+
     Parameters:
         projectid (str): TeamCity project identifier as used by the REST API.
-    
+
     Returns:
         str or None: The project's `webUrl` reported by TeamCity, or `None` if the field is absent.
-    
+
     Raises:
         requests.HTTPError: If the HTTP request to TeamCity returns a non-success status.
     """
@@ -196,10 +207,10 @@ def get_project_url(projectid):
 def get_upstream_chain_nodes(build_id):
     """
     Retrieve upstream snapshot-dependency build nodes for the specified build.
-    
+
     Parameters:
         build_id (str|int): TeamCity build ID to inspect for upstream (snapshot) dependencies.
-    
+
     Returns:
         list or None: A list of build objects containing `buildTypeId`, `id`, `number`, `startDate`, `finishDate`, and `status` for each upstream node, or `None` if no upstream builds are found.
     """
@@ -215,10 +226,10 @@ def get_upstream_chain_nodes(build_id):
 def get_template_names_for_build_type_id(build_type_id):
     """
     Finds the first template ID associated with a TeamCity build configuration that is listed in START_PROJECT_CHAIN.
-    
+
     Parameters:
         build_type_id (str): TeamCity build configuration (build type) identifier.
-    
+
     Returns:
         str or None: The matching template ID from START_PROJECT_CHAIN if found, otherwise None.
     """
@@ -234,10 +245,10 @@ def get_template_names_for_build_type_id(build_type_id):
 def get_start_date_by_last_build_id(build_id):
     """
     Finds the start date of the upstream dependency for the given build that corresponds to a template listed in START_PROJECT_CHAIN.
-    
+
     Parameters:
         build_id (str): TeamCity build identifier whose upstream dependencies will be inspected.
-    
+
     Returns:
         start_date (str): The `startDate` value from the first matching upstream dependency, or `None` if no matching dependency is found.
     """
@@ -251,11 +262,98 @@ def get_start_date_by_last_build_id(build_id):
     return None
 
 
+def get_all_build_configs():
+    """
+    Retrieve all build configurations from TeamCity, excluding those in archived projects.
+
+    Returns:
+        list: List of build configuration objects with non-archived projects only.
+
+    Raises:
+        requests.HTTPError: If the HTTP request to the TeamCity API fails.
+    """
+    logging.debug("Reached get_all_build_configs")
+
+    archived_projects = get_archived_projects()
+    data = _tc_get_json("/app/rest/buildTypes", params={
+        "fields": "buildType(id,projectId)"
+    })
+
+    all_configs = data.get("buildType", [])
+    # Filter out archived projects
+    non_archived_configs = [
+        cfg for cfg in all_configs
+        if cfg.get('projectId') not in archived_projects
+    ]
+
+    return non_archived_configs
+
+
+def get_jdk_version_for_build_config(build_type_id):
+    """
+    Retrieve the JDK version (JAVA_HOME) for a specific build configuration.
+
+    Parameters:
+        build_type_id (str): TeamCity build configuration identifier.
+
+    Returns:
+        str: JDK version string extracted from env.JAVA_HOME parameter, or 'not_set'/'error' if unavailable.
+    """
+    logging.debug(f"Fetching JDK for build config: {build_type_id}")
+
+    try:
+        data = _tc_get_json(
+            f"/app/rest/buildTypes/id:{build_type_id}/parameters/env.JAVA_HOME",
+            params={}
+        )
+        java_home = data.get('value', '')
+
+        if java_home:
+            return java_home
+        return 'not_set'
+    except requests.HTTPError as e:
+        if e.response.status_code == 404:
+            return 'not_set'
+        logging.warning(f"Failed to get JDK for {build_type_id}: {e}")
+        return 'error'
+    except Exception as e:
+        logging.warning(f"Error getting JDK for {build_type_id}: {e}")
+        return 'error'
+
+
+def update_jdk_metrics():
+    """
+    Update Prometheus gauges for total build configurations and JDK distribution.
+
+    Retrieves all non-archived build configurations and counts them by JDK version.
+    Updates TOTAL_BUILD_CONFIGS_GAUGE and JDK_BUILD_CONFIGS_GAUGE.
+    """
+    logging.info("Updating JDK metrics")
+
+    try:
+        build_configs = get_all_build_configs()
+        total_count = len(build_configs)
+
+        TOTAL_BUILD_CONFIGS_GAUGE.set(total_count)
+        logging.info(f"Total build configurations: {total_count}")
+        jdk_counts = {}
+        for cfg in build_configs:
+            jdk_version = get_jdk_version_for_build_config(cfg['id'])
+            jdk_counts[jdk_version] = jdk_counts.get(jdk_version, 0) + 1
+        for jdk_version, count in jdk_counts.items():
+            JDK_BUILD_CONFIGS_GAUGE.labels(jdk_version=jdk_version).set(count)
+            logging.info(f"JDK {jdk_version}: {count} build configurations")
+
+    except Exception as e:
+        logging.error(f"Error updating JDK metrics: {e}")
+
+
 def fetch_and_update_metrics():
     """
     Poll TeamCity and update Prometheus gauges for build and project metrics.
-    
+
     Runs continuously. On each SCRAPE_INTERVAL cycle it retrieves build configurations for TEMPLATE_IDS, skips archived projects, obtains the latest build for each configuration, updates BUILD_STATUS_GAUGE and BUILD_DURATION_GAUGE for each build, and aggregates finished projects (when a start date is available) into PROJECT_DURATION_GAUGE.
+    Also updates JDK-related metrics.
     """
     logging.debug("Reached fetch_and_update_metrics")
 
@@ -263,6 +361,9 @@ def fetch_and_update_metrics():
         archived_projects = get_archived_projects()
         all_projects = {}
         try:
+            # Update JDK metrics
+            update_jdk_metrics()
+
             for template_id in TEMPLATE_IDS:
                 build_configs = get_build_configs_from_template(template_id)
 
@@ -305,7 +406,7 @@ def fetch_and_update_metrics():
                             project_url=v["project_url"],
                             project_name=v["project_name"],
                             finished_number=v['finished_number']
-                            ).set(full_duration)
+                        ).set(full_duration)
         except Exception as e:
 
             logging.debug(f"Obtaining [ERROR] {e}")
