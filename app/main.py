@@ -40,6 +40,7 @@ START_PROJECT_CHAIN = os.environ.get("START_PROJECT_CHAIN", "")
 START_PROJECT_CHAIN = [tid.strip() for tid in START_PROJECT_CHAIN.split(",") if tid.strip()]
 STOP_PROJECT_CHAIN = os.environ.get("STOP_PROJECT_CHAIN", "")
 STOP_PROJECT_CHAIN = [tid.strip() for tid in STOP_PROJECT_CHAIN.split(",") if tid.strip()]
+JDK_PROJECT_ID = os.environ.get("JDK_PROJECT_ID", "")
 SCRAPE_INTERVAL = int(os.environ.get("SCRAPE_INTERVAL", 84600))
 METRICS_PORT = int(os.getenv("METRICS_PORT", "8000"))
 
@@ -265,6 +266,7 @@ def get_start_date_by_last_build_id(build_id):
 def get_all_build_configs():
     """
     Retrieve all build configurations from TeamCity, excluding those in archived projects.
+    If JDK_PROJECT_ID is set, only returns configs from that project and its subprojects.
 
     Returns:
         list: List of build configuration objects with non-archived projects only.
@@ -275,12 +277,14 @@ def get_all_build_configs():
     logging.debug("Reached get_all_build_configs")
 
     archived_projects = get_archived_projects()
-    data = _tc_get_json("/app/rest/buildTypes", params={
-        "fields": "buildType(id,projectId)"
-    })
+
+    logging.info(f"Filtering build configs for project: {JDK_PROJECT_ID}")
+    params = {"fields": "buildType(id,projectId,name,templates(buildType(id)))"}
+    params["locator"] = f"affectedProject:(id:{JDK_PROJECT_ID})"
+
+    data = _tc_get_json("/app/rest/buildTypes", params=params)
 
     all_configs = data.get("buildType", [])
-    # Filter out archived projects
     non_archived_configs = [
         cfg for cfg in all_configs
         if cfg.get('projectId') not in archived_projects
@@ -313,9 +317,9 @@ def get_jdk_version_for_build_config(build_type_id):
         return 'not_set'
     except requests.HTTPError as e:
         if e.response.status_code == 404:
-            return 'not_set'
+            return 'return 404'
         logging.warning(f"Failed to get JDK for {build_type_id}: {e}")
-        return 'error'
+        return 'HttpError'
     except Exception as e:
         logging.warning(f"Error getting JDK for {build_type_id}: {e}")
         return 'error'
