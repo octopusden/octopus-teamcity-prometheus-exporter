@@ -81,16 +81,16 @@ JDK_BUILD_CONFIGS_GAUGE = Gauge(
 
 def _tc_get_json(path, params=None, timeout=30):
     """
-    Fetch JSON from the TeamCity REST API at the given path and return the parsed response.
-
+    Fetch JSON from the TeamCity REST API for the given path and return the parsed response.
+    
     Parameters:
-        path (str): API path appended to the configured TeamCity base URL (e.g. "/app/rest/builds").
+        path (str): API path appended to the configured TeamCity base URL (for example, "/app/rest/builds").
         params (dict|None): Query parameters to include in the request.
         timeout (int|float): Request timeout in seconds.
-
+    
     Returns:
         The parsed JSON response (typically a dict or list).
-
+    
     Raises:
         requests.HTTPError: If the HTTP response status indicates an error.
         requests.RequestException: For other request-related errors (connection, timeout, etc.).
@@ -168,10 +168,10 @@ def get_last_build_status(build_type_id):
 def build_duration_seconds(build):
     """
     Compute the duration in seconds between a build's start and finish timestamps.
-
+    
     Parameters:
-        build (dict): Build object containing 'startDate' and 'finishDate' timestamp strings in the format "%Y%m%dT%H%M%S%z" (example: "20240102T150405+0000").
-
+        build (dict): Build object containing 'startDate' and 'finishDate' strings in the format "%Y%m%dT%H%M%S%z" (example: "20240102T150405+0000").
+    
     Returns:
         int or None: Number of seconds from start to finish, or `None` if either timestamp is missing.
     """
@@ -207,13 +207,13 @@ def get_project_url(projectid):
 
 def get_upstream_chain_nodes(build_id):
     """
-    Retrieve upstream snapshot-dependency build nodes for the specified build.
-
+    Retrieve upstream snapshot-dependency build nodes for a TeamCity build.
+    
     Parameters:
-        build_id (str|int): TeamCity build ID to inspect for upstream (snapshot) dependencies.
-
+        build_id: TeamCity build ID whose upstream (snapshot) dependencies will be inspected.
+    
     Returns:
-        list or None: A list of build objects containing `buildTypeId`, `id`, `number`, `startDate`, `finishDate`, and `status` for each upstream node, or `None` if no upstream builds are found.
+        A list of build objects each containing `buildTypeId`, `id`, `number`, `startDate`, `finishDate`, and `status`, or `None` if no upstream builds are found.
     """
     locator = f"snapshotDependency:(to:(id:{build_id})),defaultFilter:false"
     data = _tc_get_json("/app/rest/builds", params={
@@ -265,12 +265,11 @@ def get_start_date_by_last_build_id(build_id):
 
 def get_all_build_configs():
     """
-    Retrieve all build configurations from TeamCity, excluding those in archived projects.
-    If JDK_PROJECT_ID is set, only returns configs from that project and its subprojects.
-
+    Retrieve non-archived build configurations from TeamCity, optionally limited to the configured JDK project and its subprojects.
+    
     Returns:
-        list: List of build configuration objects with non-archived projects only.
-
+        list: Build configuration objects as returned by the TeamCity API, filtered to exclude configurations whose projects are archived.
+    
     Raises:
         requests.HTTPError: If the HTTP request to the TeamCity API fails.
     """
@@ -296,13 +295,14 @@ def get_all_build_configs():
 
 def get_jdk_version_for_build_config(build_type_id):
     """
-    Retrieve the JDK version (JAVA_HOME) for a specific build configuration.
-
+    Get the JDK installation path configured for a TeamCity build configuration.
+    
     Parameters:
         build_type_id (str): TeamCity build configuration identifier.
-
+    
     Returns:
-        str: JDK version string extracted from env.JAVA_HOME parameter, or 'not_set'/'error' if unavailable.
+        str: The `env.JAVA_HOME` parameter value when configured; `'not_set'` if the parameter exists but is empty or missing;
+        `'return 404'` if the parameter endpoint returns 404; `'HttpError'` for other HTTP errors; `'error'` for any other failure.
     """
     logging.debug(f"Fetching JDK for build config: {build_type_id}")
 
@@ -328,10 +328,9 @@ def get_jdk_version_for_build_config(build_type_id):
 
 def update_jdk_metrics():
     """
-    Update Prometheus gauges for total build configurations and JDK distribution.
-
-    Retrieves all non-archived build configurations and counts them by JDK version.
-    Updates TOTAL_BUILD_CONFIGS_GAUGE and JDK_BUILD_CONFIGS_GAUGE.
+    Update Prometheus gauges reflecting the total number of build configurations and their distribution by JDK version.
+    
+    Collects all non-archived build configurations, sets TOTAL_BUILD_CONFIGS_GAUGE to the total count, and sets JDK_BUILD_CONFIGS_GAUGE for each observed JDK version with the number of configurations using that JDK. Errors encountered while retrieving data are logged and do not raise.
     """
     logging.info("Updating JDK metrics")
 
@@ -356,10 +355,9 @@ def update_jdk_metrics():
 
 def fetch_and_update_metrics():
     """
-    Poll TeamCity and update Prometheus gauges for build and project metrics.
-
-    Runs continuously. On each SCRAPE_INTERVAL cycle it retrieves build configurations for TEMPLATE_IDS, skips archived projects, obtains the latest build for each configuration, updates BUILD_STATUS_GAUGE and BUILD_DURATION_GAUGE for each build, and aggregates finished projects (when a start date is available) into PROJECT_DURATION_GAUGE.
-    Also updates JDK-related metrics.
+    Continuously poll TeamCity and refresh Prometheus gauges for builds, projects, and JDK distribution.
+    
+    On each interval it retrieves build configurations for the configured templates, skips archived projects, records the latest build status and successful build durations, aggregates project durations for finished project chains, and updates JDK-related metrics; this function runs indefinitely and sleeps SCRAPE_INTERVAL between iterations.
     """
     logging.debug("Reached fetch_and_update_metrics")
 
