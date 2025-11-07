@@ -40,7 +40,7 @@ START_PROJECT_CHAIN = os.environ.get("START_PROJECT_CHAIN", "")
 START_PROJECT_CHAIN = [tid.strip() for tid in START_PROJECT_CHAIN.split(",") if tid.strip()]
 STOP_PROJECT_CHAIN = os.environ.get("STOP_PROJECT_CHAIN", "")
 STOP_PROJECT_CHAIN = [tid.strip() for tid in STOP_PROJECT_CHAIN.split(",") if tid.strip()]
-JDK_PROJECT_ID = os.environ.get("JDK_PROJECT_ID", "")
+JDK_PROJECT_ID = os.environ.get("JDK_PROJECT_ID")
 SCRAPE_INTERVAL = int(os.environ.get("SCRAPE_INTERVAL", 84600))
 METRICS_PORT = int(os.getenv("METRICS_PORT", "8000"))
 
@@ -418,8 +418,8 @@ def fetch_and_update_metrics():
 
 
 if __name__ == "__main__":
-    if not all([TEAMCITY_URL, TOKEN, TEMPLATE_IDS]):
-        _error_txt = "TEAMCITY_URL, TEAMCITY_TOKEN, and TEAMCITY_TEMPLATE_IDS must be set as environment variables"
+    if not all([TEAMCITY_URL, TOKEN, TEMPLATE_IDS, JDK_PROJECT_ID]):
+        _error_txt = "TEAMCITY_URL, TEAMCITY_TOKEN, TEAMCITY_TEMPLATE_IDS and JDK_PROJECT_ID must be set as environment variables"
         logging.info(_error_txt)
         raise EnvironmentError(_error_txt)
     start_http_server(METRICS_PORT)
