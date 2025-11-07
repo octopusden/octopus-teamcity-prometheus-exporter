@@ -339,6 +339,7 @@ def update_jdk_metrics():
         total_count = len(build_configs)
 
         TOTAL_BUILD_CONFIGS_GAUGE.set(total_count)
+        JDK_BUILD_CONFIGS_GAUGE.clear()
         logging.info(f"Total build configurations: {total_count}")
         jdk_counts = {}
         for cfg in build_configs:
@@ -346,7 +347,6 @@ def update_jdk_metrics():
             jdk_counts[jdk_version] = jdk_counts.get(jdk_version, 0) + 1
         for jdk_version, count in jdk_counts.items():
             JDK_BUILD_CONFIGS_GAUGE.labels(jdk_version=jdk_version).set(count)
-            JDK_BUILD_CONFIGS_GAUGE.clear()
             logging.info(f"JDK {jdk_version}: {count} build configurations")
 
     except Exception as e:
