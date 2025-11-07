@@ -285,11 +285,12 @@ def get_all_build_configs():
     data = _tc_get_json("/app/rest/buildTypes", params=params)
 
     all_configs = data.get("buildType", [])
+    logging.info(f"All build for project {JDK_PROJECT_ID} count is {len(all_configs)}")
     non_archived_configs = [
         cfg for cfg in all_configs
         if cfg.get('projectId') not in archived_projects
     ]
-
+    logging.info(f"All non archived build for project {JDK_PROJECT_ID} count is {len(non_archived_configs)}")
     return non_archived_configs
 
 
@@ -346,6 +347,7 @@ def update_jdk_metrics():
             jdk_counts[jdk_version] = jdk_counts.get(jdk_version, 0) + 1
         for jdk_version, count in jdk_counts.items():
             JDK_BUILD_CONFIGS_GAUGE.labels(jdk_version=jdk_version).set(count)
+            JDK_BUILD_CONFIGS_GAUGE.clear()
             logging.info(f"JDK {jdk_version}: {count} build configurations")
 
     except Exception as e:
