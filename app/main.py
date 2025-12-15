@@ -42,6 +42,7 @@ STOP_PROJECT_CHAIN = os.environ.get("STOP_PROJECT_CHAIN", "")
 STOP_PROJECT_CHAIN = [tid.strip() for tid in STOP_PROJECT_CHAIN.split(",") if tid.strip()]
 JDK_PROJECT_ID = os.environ.get("JDK_PROJECT_ID")
 SCRAPE_INTERVAL = int(os.environ.get("SCRAPE_INTERVAL", 84600))
+STATUS_SCRAPE_INTERVAL = int(os.environ.get("STATUS_SCRAPE_INTERVAL", 1800))  # 30 minutes by default
 METRICS_PORT = int(os.getenv("METRICS_PORT", "8000"))
 
 HEADERS = {
@@ -82,15 +83,15 @@ JDK_BUILD_CONFIGS_GAUGE = Gauge(
 def _tc_get_json(path, params=None, timeout=30):
     """
     Fetch JSON from the TeamCity REST API for the given path and return the parsed response.
-    
+
     Parameters:
         path (str): API path appended to the configured TeamCity base URL (for example, "/app/rest/builds").
         params (dict|None): Query parameters to include in the request.
         timeout (int|float): Request timeout in seconds.
-    
+
     Returns:
         The parsed JSON response (typically a dict or list).
-    
+
     Raises:
         requests.HTTPError: If the HTTP response status indicates an error.
         requests.RequestException: For other request-related errors (connection, timeout, etc.).
@@ -168,10 +169,10 @@ def get_last_build_status(build_type_id):
 def build_duration_seconds(build):
     """
     Compute the duration in seconds between a build's start and finish timestamps.
-    
+
     Parameters:
         build (dict): Build object containing 'startDate' and 'finishDate' strings in the format "%Y%m%dT%H%M%S%z" (example: "20240102T150405+0000").
-    
+
     Returns:
         int or None: Number of seconds from start to finish, or `None` if either timestamp is missing.
     """
@@ -208,10 +209,10 @@ def get_project_url(projectid):
 def get_upstream_chain_nodes(build_id):
     """
     Retrieve upstream snapshot-dependency build nodes for a TeamCity build.
-    
+
     Parameters:
         build_id: TeamCity build ID whose upstream (snapshot) dependencies will be inspected.
-    
+
     Returns:
         A list of build objects each containing `buildTypeId`, `id`, `number`, `startDate`, `finishDate`, and `status`, or `None` if no upstream builds are found.
     """
@@ -266,10 +267,10 @@ def get_start_date_by_last_build_id(build_id):
 def get_all_build_configs():
     """
     Retrieve non-archived build configurations from TeamCity, optionally limited to the configured JDK project and its subprojects.
-    
+
     Returns:
         list: Build configuration objects as returned by the TeamCity API, filtered to exclude configurations whose projects are archived.
-    
+
     Raises:
         requests.HTTPError: If the HTTP request to the TeamCity API fails.
     """
@@ -296,10 +297,10 @@ def get_all_build_configs():
 def get_jdk_version_for_build_config(build_type_id):
     """
     Get the JDK installation path configured for a TeamCity build configuration.
-    
+
     Parameters:
         build_type_id (str): TeamCity build configuration identifier.
-    
+
     Returns:
         str: The `env.JAVA_HOME` parameter value when configured; `'not_set'` if the parameter exists but is empty or missing;
         `'return 404'` if the parameter endpoint returns 404; `'HttpError'` for other HTTP errors; `'error'` for any other failure.
@@ -329,7 +330,7 @@ def get_jdk_version_for_build_config(build_type_id):
 def update_jdk_metrics():
     """
     Update Prometheus gauges reflecting the total number of build configurations and their distribution by JDK version.
-    
+
     Collects all non-archived build configurations, sets TOTAL_BUILD_CONFIGS_GAUGE to the total count, and sets JDK_BUILD_CONFIGS_GAUGE for each observed JDK version with the number of configurations using that JDK. Errors encountered while retrieving data are logged and do not raise.
     """
     logging.info("Updating JDK metrics")
@@ -353,13 +354,50 @@ def update_jdk_metrics():
         logging.error(f"Error updating JDK metrics: {e}")
 
 
-def fetch_and_update_metrics():
+def update_build_status_metrics():
     """
-    Continuously poll TeamCity and refresh Prometheus gauges for builds, projects, and JDK distribution.
-    
-    On each interval it retrieves build configurations for the configured templates, skips archived projects, records the latest build status and successful build durations, aggregates project durations for finished project chains, and updates JDK-related metrics; this function runs indefinitely and sleeps SCRAPE_INTERVAL between iterations.
+    Update only BUILD_STATUS_GAUGE metrics for all build configurations from configured templates.
+    This function runs more frequently to provide faster status updates.
     """
-    logging.debug("Reached fetch_and_update_metrics")
+    logging.info("Updating build status metrics")
+
+    try:
+        archived_projects = get_archived_projects()
+
+        for template_id in TEMPLATE_IDS:
+            build_configs = get_build_configs_from_template(template_id)
+
+            for cfg in build_configs:
+                if cfg['projectId'] in archived_projects:
+                    continue
+
+                last_build = get_last_build_status(cfg["id"])
+                status = last_build['status']
+                status_value = {"SUCCESS": 1, "FAILURE": 0, "NO_BUILDS": -1}.get(status, -1)
+
+                BUILD_STATUS_GAUGE.labels(
+                    template_id=template_id,
+                    build_type_name=cfg["name"],
+                    build_type_id=cfg["id"],
+                    build_url=cfg["webUrl"]
+                ).set(status_value)
+
+        logging.info(f"Build status metrics updated successfully")
+
+    except Exception as e:
+        logging.error(f"Error updating build status metrics: {e}")
+
+
+def fetch_and_update_full_metrics():
+    """
+    Continuously poll TeamCity and refresh ALL Prometheus gauges for builds, projects, and JDK distribution.
+
+    On each interval it retrieves build configurations for the configured templates, skips archived projects,
+    records the latest build status and successful build durations, aggregates project durations for finished
+    project chains, and updates JDK-related metrics; this function runs indefinitely and sleeps SCRAPE_INTERVAL
+    between iterations.
+    """
+    logging.info("Starting full metrics update thread")
 
     while True:
         archived_projects = get_archived_projects()
@@ -412,9 +450,27 @@ def fetch_and_update_metrics():
                             finished_number=v['finished_number']
                         ).set(full_duration)
         except Exception as e:
+            logging.error(f"Error in full metrics update: {e}")
 
-            logging.debug(f"Obtaining [ERROR] {e}")
+        logging.info(f"Sleeping for {SCRAPE_INTERVAL} seconds until next full update")
         time.sleep(SCRAPE_INTERVAL)
+
+
+def fetch_and_update_status_metrics():
+    """
+    Continuously poll TeamCity and refresh only BUILD_STATUS_GAUGE metrics.
+    This function runs more frequently than the full metrics update.
+    """
+    logging.info("Starting status metrics update thread")
+
+    while True:
+        try:
+            update_build_status_metrics()
+        except Exception as e:
+            logging.error(f"Error in status metrics update: {e}")
+
+        logging.info(f"Sleeping for {STATUS_SCRAPE_INTERVAL} seconds until next status update")
+        time.sleep(STATUS_SCRAPE_INTERVAL)
 
 
 if __name__ == "__main__":
@@ -422,7 +478,23 @@ if __name__ == "__main__":
         _error_txt = "TEAMCITY_URL, TEAMCITY_TOKEN, TEAMCITY_TEMPLATE_IDS and JDK_PROJECT_ID must be set as environment variables"
         logging.info(_error_txt)
         raise EnvironmentError(_error_txt)
+
     start_http_server(METRICS_PORT)
     logging.info(f"Prometheus metrics server running on :{METRICS_PORT}/metrics")
-    thread = threading.Thread(target=fetch_and_update_metrics)
-    thread.start()
+    logging.info(f"Status metrics interval: {STATUS_SCRAPE_INTERVAL} seconds")
+    logging.info(f"Full metrics interval: {SCRAPE_INTERVAL} seconds")
+
+    # Start thread for full metrics (JDK, durations, projects, status)
+    full_metrics_thread = threading.Thread(target=fetch_and_update_full_metrics, daemon=True)
+    full_metrics_thread.start()
+
+    # Start thread for fast status updates only
+    status_metrics_thread = threading.Thread(target=fetch_and_update_status_metrics, daemon=True)
+    status_metrics_thread.start()
+
+    # Keep main thread alive
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logging.info("Shutting down exporter")
