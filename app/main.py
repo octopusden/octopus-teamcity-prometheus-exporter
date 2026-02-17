@@ -53,7 +53,7 @@ HEADERS = {
 BUILD_STATUS_GAUGE = Gauge(
     "teamcity_last_build_status",
     "Last build status for build configurations from a template",
-    ["build_type_name", "template_id", "build_type_id", "build_url"]
+    ["build_type_name", "template_id", "build_type_id", "build_url","finish_date"]
 )
 
 BUILD_DURATION_GAUGE = Gauge(
@@ -379,7 +379,8 @@ def update_build_status_metrics():
                     template_id=template_id,
                     build_type_name=cfg["name"],
                     build_type_id=cfg["id"],
-                    build_url=cfg["webUrl"]
+                    build_url=cfg["webUrl"],
+                    finish_date=cfg['finishDate']
                 ).set(status_value)
 
         logging.info(f"Build status metrics updated successfully")
@@ -436,7 +437,8 @@ def fetch_and_update_full_metrics():
                         template_id=template_id,
                         build_type_name=cfg["name"],
                         build_type_id=cfg["id"],
-                        build_url=cfg["webUrl"]
+                        build_url=cfg["webUrl"],
+                        finish_date=cfg['finishDate']
                     ).set(status_value)
 
             for k, v in all_projects.items():
