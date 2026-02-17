@@ -374,19 +374,25 @@ def update_build_status_metrics():
                 last_build = get_last_build_status(cfg["id"])
                 status = last_build['status']
                 status_value = {"SUCCESS": 1, "FAILURE": 0, "NO_BUILDS": -1}.get(status, -1)
-
+                if status == "NO_BUILDS":
+                    finish_date = 0
+                    start_date = 0
+                else:
+                    finish_date = last_build['finishDate']
+                    start_date = last_build['startDate']
                 BUILD_STATUS_GAUGE.labels(
                     template_id=template_id,
                     build_type_name=cfg["name"],
                     build_type_id=cfg["id"],
                     build_url=cfg["webUrl"],
-                    finish_date=last_build['finishDate'],
-                    start_date=last_build['startDate']
+                    finish_date=finish_date,
+                    start_date=start_date
                 ).set(status_value)
 
         logging.info(f"Build status metrics updated successfully")
 
     except Exception as e:
+        logging.info(f"{status} - {status_value}")
         logging.error(f"Error updating build status metrics: {e}")
 
 
@@ -434,15 +440,20 @@ def fetch_and_update_full_metrics():
                             build_type_id=cfg["id"],
                             build_url=cfg["webUrl"]).set(duration)
 
+                    if status == "NO_BUILDS":
+                        finish_date = 0
+                        start_date = 0
+                    else:
+                        finish_date = last_build['finishDate']
+                        start_date = last_build['startDate']
                     BUILD_STATUS_GAUGE.labels(
                         template_id=template_id,
                         build_type_name=cfg["name"],
                         build_type_id=cfg["id"],
                         build_url=cfg["webUrl"],
-                        finish_date=last_build['finishDate'],
-                        start_date=last_build['startDate']
+                        finish_date=finish_date,
+                        start_date=start_date
                     ).set(status_value)
-
             for k, v in all_projects.items():
                 if v['startDate']:
                     full_duration = build_duration_seconds(v)
@@ -489,8 +500,8 @@ if __name__ == "__main__":
     logging.info(f"Full metrics interval: {SCRAPE_INTERVAL} seconds")
 
     # Start thread for full metrics (JDK, durations, projects, status)
-    full_metrics_thread = threading.Thread(target=fetch_and_update_full_metrics, daemon=True)
-    full_metrics_thread.start()
+    #full_metrics_thread = threading.Thread(target=fetch_and_update_full_metrics, daemon=True)
+    #full_metrics_thread.start()
 
     # Start thread for fast status updates only
     status_metrics_thread = threading.Thread(target=fetch_and_update_status_metrics, daemon=True)
