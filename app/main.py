@@ -392,7 +392,6 @@ def update_build_status_metrics():
         logging.info(f"Build status metrics updated successfully")
 
     except Exception as e:
-        logging.info(f"{status} - {status_value}")
         logging.error(f"Error updating build status metrics: {e}")
 
 
@@ -500,8 +499,8 @@ if __name__ == "__main__":
     logging.info(f"Full metrics interval: {SCRAPE_INTERVAL} seconds")
 
     # Start thread for full metrics (JDK, durations, projects, status)
-    #full_metrics_thread = threading.Thread(target=fetch_and_update_full_metrics, daemon=True)
-    #full_metrics_thread.start()
+    full_metrics_thread = threading.Thread(target=fetch_and_update_full_metrics, daemon=True)
+    full_metrics_thread.start()
 
     # Start thread for fast status updates only
     status_metrics_thread = threading.Thread(target=fetch_and_update_status_metrics, daemon=True)
