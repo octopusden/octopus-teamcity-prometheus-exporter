@@ -359,8 +359,12 @@ def convert_time(dt_str=""):
 
 def update_build_status_metrics():
     """
-    Update only BUILD_STATUS_GAUGE metrics for all build configurations from configured templates.
-    This function runs more frequently to provide faster status updates.
+    Update BUILD_STATUS_GAUGE for all build configurations derived from the configured templates.
+    
+    For each non-archived build configuration this function sets BUILD_STATUS_GAUGE with labels
+    (template_id, build_type_name, build_type_id, build_url, finish_date, start_date).
+    Value semantics: `1` for SUCCESS, `0` for FAILURE, `-1` for NO_BUILDS or unknown status.
+    Skip build configurations belonging to archived projects.
     """
     logging.info("Updating build status metrics")
 
@@ -396,12 +400,12 @@ def update_build_status_metrics():
 
 def fetch_and_update_full_metrics():
     """
-    Continuously poll TeamCity and refresh ALL Prometheus gauges for builds, projects, and JDK distribution.
-
-    On each interval it retrieves build configurations for the configured templates, skips archived projects,
-    records the latest build status and successful build durations, aggregates project durations for finished
-    project chains, and updates JDK-related metrics; this function runs indefinitely and sleeps SCRAPE_INTERVAL
-    between iterations.
+    Continuously poll TeamCity and refresh all Prometheus gauges for builds, projects, and JDK distribution.
+    
+    This function runs indefinitely: on each iteration it updates JDK-related metrics, iterates configured templates to
+    collect non-archived build configurations, records latest build status and successful build durations, aggregates
+    project-chain durations for templates in the stop-project chain, and updates project-level duration metrics.
+    It skips archived projects and pauses SCRAPE_INTERVAL seconds between iterations.
     """
     logging.info("Starting full metrics update thread")
 
