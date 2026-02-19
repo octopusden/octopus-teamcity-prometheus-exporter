@@ -353,6 +353,8 @@ def update_jdk_metrics():
         logging.error(f"Error updating JDK metrics: {e}")
 
 def convert_time(dt_str=""):
+    if not dt_str:
+        return 0
     dt = datetime.strptime(dt_str, "%Y%m%dT%H%M%S%z")
     return int(dt.timestamp())
 
