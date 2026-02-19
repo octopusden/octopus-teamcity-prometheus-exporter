@@ -4,8 +4,7 @@ import requests
 import threading
 from prometheus_client import start_http_server, Gauge, Summary
 import logging
-from datetime import datetime
-import json
+from datetime import datetime, timezone
 
 
 def get_log_level():
@@ -353,6 +352,10 @@ def update_jdk_metrics():
     except Exception as e:
         logging.error(f"Error updating JDK metrics: {e}")
 
+def convert_time(dt_str=""):
+    dt = datetime.strptime(dt_str, "%Y%m%dT%H%M%S%z")
+    return int(dt.timestamp())
+
 
 def update_build_status_metrics():
     """
@@ -374,12 +377,8 @@ def update_build_status_metrics():
                 last_build = get_last_build_status(cfg["id"])
                 status = last_build['status']
                 status_value = {"SUCCESS": 1, "FAILURE": 0, "NO_BUILDS": -1}.get(status, -1)
-                if status == "NO_BUILDS":
-                    finish_date = 0
-                    start_date = 0
-                else:
-                    finish_date = last_build['finishDate']
-                    start_date = last_build['startDate']
+                finish_date = convert_time(last_build.get('finishDate', '')) if status != "NO_BUILDS" else 0
+                start_date = convert_time(last_build.get('startDate', '')) if status != "NO_BUILDS" else 0
                 BUILD_STATUS_GAUGE.labels(
                     template_id=template_id,
                     build_type_name=cfg["name"],
@@ -439,12 +438,8 @@ def fetch_and_update_full_metrics():
                             build_type_id=cfg["id"],
                             build_url=cfg["webUrl"]).set(duration)
 
-                    if status == "NO_BUILDS":
-                        finish_date = 0
-                        start_date = 0
-                    else:
-                        finish_date = last_build['finishDate']
-                        start_date = last_build['startDate']
+                    finish_date = convert_time(last_build.get('finishDate', '')) if status != "NO_BUILDS" else 0
+                    start_date = convert_time(last_build.get('startDate', '')) if status != "NO_BUILDS" else 0
                     BUILD_STATUS_GAUGE.labels(
                         template_id=template_id,
                         build_type_name=cfg["name"],

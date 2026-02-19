@@ -30,8 +30,8 @@ teamcity_last_build_status{
   build_type_id="<< ID of the build being checked >>",
   build_type_name="<< name of the specific build >>",
   build_url="<< build URL >>"
-  finish_date=finish_date,
-  start_date=start_date
+  finish_date="<< build finish date >>",
+  start_date="<< build start date >>"
 } << build result >>
 ```
 
