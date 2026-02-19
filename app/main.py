@@ -353,11 +353,12 @@ def update_jdk_metrics():
         logging.error(f"Error updating JDK metrics: {e}")
 
 def convert_time(dt_str=""):
-    if not dt_str:
+    try:
+        dt = datetime.strptime(dt_str, "%Y%m%dT%H%M%S%z")
+        return int(dt.timestamp())
+    except (ValueError, TypeError):
+        logging.warning(f"Failed to parse timestamp: {dt_str!r}")
         return 0
-    dt = datetime.strptime(dt_str, "%Y%m%dT%H%M%S%z")
-    return int(dt.timestamp())
-
 
 def update_build_status_metrics():
     """
