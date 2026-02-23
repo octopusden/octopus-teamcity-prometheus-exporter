@@ -44,7 +44,8 @@ SCRAPE_INTERVAL = int(os.environ.get("SCRAPE_INTERVAL", 84600))
 STATUS_SCRAPE_INTERVAL = int(os.environ.get("STATUS_SCRAPE_INTERVAL", 1800))  # 30 minutes by default
 METRICS_PORT = int(os.getenv("METRICS_PORT", "8000"))
 BUILD_LIMIT = os.environ.get("BUILD_LIMIT", None)
-
+if BUILD_LIMIT:
+    BUILD_LIMIT = int(BUILD_LIMIT)
 HEADERS = {
     "Authorization": f"Bearer {TOKEN}",
     "Accept": "application/json"
@@ -496,8 +497,8 @@ if __name__ == "__main__":
     logging.info(f"Status metrics interval: {STATUS_SCRAPE_INTERVAL} seconds")
     logging.info(f"Full metrics interval: {SCRAPE_INTERVAL} seconds")
 
-    full_metrics_thread = threading.Thread(target=fetch_and_update_full_metrics, daemon=True)
-    full_metrics_thread.start()
+    # full_metrics_thread = threading.Thread(target=fetch_and_update_full_metrics, daemon=True)
+    # full_metrics_thread.start()
 
     status_metrics_thread = threading.Thread(target=fetch_and_update_status_metrics, daemon=True)
     status_metrics_thread.start()
