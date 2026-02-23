@@ -43,6 +43,7 @@ JDK_PROJECT_ID = os.environ.get("JDK_PROJECT_ID")
 SCRAPE_INTERVAL = int(os.environ.get("SCRAPE_INTERVAL", 84600))
 STATUS_SCRAPE_INTERVAL = int(os.environ.get("STATUS_SCRAPE_INTERVAL", 1800))  # 30 minutes by default
 METRICS_PORT = int(os.getenv("METRICS_PORT", "8000"))
+BUILD_LIMIT = os.environ.get("BUILD_LIMIT", None)
 
 HEADERS = {
     "Authorization": f"Bearer {TOKEN}",
@@ -52,7 +53,19 @@ HEADERS = {
 BUILD_STATUS_GAUGE = Gauge(
     "teamcity_last_build_status",
     "Last build status for build configurations from a template",
-    ["build_type_name", "template_id", "build_type_id", "build_url", "finish_date", "start_date"]
+    ["build_type_name", "template_id", "build_type_id", "build_url"]
+)
+
+BUILD_FINISH_DATE_GAUGE = Gauge(
+    "teamcity_last_build_finish_date",
+    "Last build finish date (unix timestamp) for build configurations from a template",
+    ["build_type_name", "template_id", "build_type_id", "build_url"]
+)
+
+BUILD_START_DATE_GAUGE = Gauge(
+    "teamcity_last_build_start_date",
+    "Last build start date (unix timestamp) for build configurations from a template",
+    ["build_type_name", "template_id", "build_type_id", "build_url"]
 )
 
 BUILD_DURATION_GAUGE = Gauge(
@@ -182,9 +195,7 @@ def build_duration_seconds(build):
     fmt = "%Y%m%dT%H%M%S%z"
     start = datetime.strptime(start_raw, fmt)
     finish = datetime.strptime(finish_raw, fmt)
-
-    delta = finish - start
-    return int(delta.total_seconds())
+    return int((finish - start).total_seconds())
 
 
 def get_project_url(projectid):
@@ -220,7 +231,6 @@ def get_upstream_chain_nodes(build_id):
         "locator": locator,
         "fields": "build(buildTypeId,id,number,startDate,finishDate,status)"
     })
-
     return data.get("build")
 
 
@@ -258,8 +268,7 @@ def get_start_date_by_last_build_id(build_id):
         template_name = get_template_names_for_build_type_id(each_dependencies['buildTypeId'])
         if not template_name:
             continue
-        else:
-            return each_dependencies['startDate']
+        return each_dependencies['startDate']
     return None
 
 
@@ -274,21 +283,16 @@ def get_all_build_configs():
         requests.HTTPError: If the HTTP request to the TeamCity API fails.
     """
     logging.debug("Reached get_all_build_configs")
-
     archived_projects = get_archived_projects()
-
     logging.info(f"Filtering build configs for project: {JDK_PROJECT_ID}")
-    params = {"fields": "buildType(id,projectId,name,templates(buildType(id)))"}
-    params["locator"] = f"affectedProject:(id:{JDK_PROJECT_ID})"
-
+    params = {
+        "fields": "buildType(id,projectId,name,templates(buildType(id)))",
+        "locator": f"affectedProject:(id:{JDK_PROJECT_ID})"
+    }
     data = _tc_get_json("/app/rest/buildTypes", params=params)
-
     all_configs = data.get("buildType", [])
     logging.info(f"All build for project {JDK_PROJECT_ID} count is {len(all_configs)}")
-    non_archived_configs = [
-        cfg for cfg in all_configs
-        if cfg.get('projectId') not in archived_projects
-    ]
+    non_archived_configs = [cfg for cfg in all_configs if cfg.get('projectId') not in archived_projects]
     logging.info(f"All non archived build for project {JDK_PROJECT_ID} count is {len(non_archived_configs)}")
     return non_archived_configs
 
@@ -305,17 +309,13 @@ def get_jdk_version_for_build_config(build_type_id):
         `'return 404'` if the parameter endpoint returns 404; `'HttpError'` for other HTTP errors; `'error'` for any other failure.
     """
     logging.debug(f"Fetching JDK for build config: {build_type_id}")
-
     try:
         data = _tc_get_json(
             f"/app/rest/buildTypes/id:{build_type_id}/parameters/env.JAVA_HOME",
             params={}
         )
         java_home = data.get('value', '')
-
-        if java_home:
-            return java_home
-        return 'not_set'
+        return java_home if java_home else 'not_set'
     except requests.HTTPError as e:
         if e.response.status_code == 404:
             return 'return 404'
@@ -333,11 +333,9 @@ def update_jdk_metrics():
     Collects all non-archived build configurations, sets TOTAL_BUILD_CONFIGS_GAUGE to the total count, and sets JDK_BUILD_CONFIGS_GAUGE for each observed JDK version with the number of configurations using that JDK. Errors encountered while retrieving data are logged and do not raise.
     """
     logging.info("Updating JDK metrics")
-
     try:
         build_configs = get_all_build_configs()
         total_count = len(build_configs)
-
         TOTAL_BUILD_CONFIGS_GAUGE.set(total_count)
         JDK_BUILD_CONFIGS_GAUGE.clear()
         logging.info(f"Total build configurations: {total_count}")
@@ -348,9 +346,9 @@ def update_jdk_metrics():
         for jdk_version, count in jdk_counts.items():
             JDK_BUILD_CONFIGS_GAUGE.labels(jdk_version=jdk_version).set(count)
             logging.info(f"JDK {jdk_version}: {count} build configurations")
-
     except Exception as e:
         logging.error(f"Error updating JDK metrics: {e}")
+
 
 def convert_time(dt_str=""):
     try:
@@ -360,43 +358,50 @@ def convert_time(dt_str=""):
         logging.warning(f"Failed to parse timestamp: {dt_str!r}")
         return 0
 
+
+def _set_build_metrics(template_id, cfg, last_build):
+    """
+    Helper: sets BUILD_STATUS_GAUGE, BUILD_FINISH_DATE_GAUGE, and BUILD_START_DATE_GAUGE
+    for a single build configuration based on the latest build result.
+    """
+    status = last_build['status']
+    status_value = {"SUCCESS": 1, "FAILURE": 0, "NO_BUILDS": -1}.get(status, -1)
+
+    finish_date = convert_time(last_build.get('finishDate', '')) if status != "NO_BUILDS" else 0
+    start_date = convert_time(last_build.get('startDate', '')) if status != "NO_BUILDS" else 0
+
+    labels = dict(
+        template_id=template_id,
+        build_type_name=cfg["name"],
+        build_type_id=cfg["id"],
+        build_url=cfg["webUrl"],
+    )
+
+    BUILD_STATUS_GAUGE.labels(**labels).set(status_value)
+    BUILD_FINISH_DATE_GAUGE.labels(**labels).set(finish_date)
+    BUILD_START_DATE_GAUGE.labels(**labels).set(start_date)
+
+
 def update_build_status_metrics():
     """
     Update BUILD_STATUS_GAUGE for all build configurations derived from the configured templates.
-    
+
     For each non-archived build configuration this function sets BUILD_STATUS_GAUGE with labels
     (template_id, build_type_name, build_type_id, build_url, finish_date, start_date).
     Value semantics: `1` for SUCCESS, `0` for FAILURE, `-1` for NO_BUILDS or unknown status.
     Skip build configurations belonging to archived projects.
     """
     logging.info("Updating build status metrics")
-
     try:
         archived_projects = get_archived_projects()
-
         for template_id in TEMPLATE_IDS:
-            build_configs = get_build_configs_from_template(template_id)
-
+            build_configs = get_build_configs_from_template(template_id)[:BUILD_LIMIT]
             for cfg in build_configs:
                 if cfg['projectId'] in archived_projects:
                     continue
-
                 last_build = get_last_build_status(cfg["id"])
-                status = last_build['status']
-                status_value = {"SUCCESS": 1, "FAILURE": 0, "NO_BUILDS": -1}.get(status, -1)
-                finish_date = convert_time(last_build.get('finishDate', '')) if status != "NO_BUILDS" else 0
-                start_date = convert_time(last_build.get('startDate', '')) if status != "NO_BUILDS" else 0
-                BUILD_STATUS_GAUGE.labels(
-                    template_id=template_id,
-                    build_type_name=cfg["name"],
-                    build_type_id=cfg["id"],
-                    build_url=cfg["webUrl"],
-                    finish_date=finish_date,
-                    start_date=start_date
-                ).set(status_value)
-
-        logging.info(f"Build status metrics updated successfully")
-
+                _set_build_metrics(template_id, cfg, last_build)
+        logging.info("Build status metrics updated successfully")
     except Exception as e:
         logging.error(f"Error updating build status metrics: {e}")
 
@@ -404,31 +409,29 @@ def update_build_status_metrics():
 def fetch_and_update_full_metrics():
     """
     Continuously poll TeamCity and refresh all Prometheus gauges for builds, projects, and JDK distribution.
-    
+
     This function runs indefinitely: on each iteration it updates JDK-related metrics, iterates configured templates to
     collect non-archived build configurations, records latest build status and successful build durations, aggregates
     project-chain durations for templates in the stop-project chain, and updates project-level duration metrics.
     It skips archived projects and pauses SCRAPE_INTERVAL seconds between iterations.
     """
     logging.info("Starting full metrics update thread")
-
     while True:
         archived_projects = get_archived_projects()
         all_projects = {}
         try:
-            # Update JDK metrics
             update_jdk_metrics()
 
             for template_id in TEMPLATE_IDS:
-                build_configs = get_build_configs_from_template(template_id)
-
+                build_configs = get_build_configs_from_template(template_id)[:BUILD_LIMIT]
                 for cfg in build_configs:
                     if cfg['projectId'] in archived_projects:
                         continue
+
                     last_build = get_last_build_status(cfg["id"])
                     status = last_build['status']
-                    status_value = {"SUCCESS": 1, "FAILURE": 0, "NO_BUILDS": -1}.get(status, -1)
                     current_project_id = cfg['projectId']
+
                     if status == 'SUCCESS':
                         duration = build_duration_seconds(last_build)
                         if template_id in STOP_PROJECT_CHAIN:
@@ -443,18 +446,12 @@ def fetch_and_update_full_metrics():
                             template_id=template_id,
                             build_type_name=cfg["name"],
                             build_type_id=cfg["id"],
-                            build_url=cfg["webUrl"]).set(duration)
+                            build_url=cfg["webUrl"],
+                        ).set(duration)
 
-                    finish_date = convert_time(last_build.get('finishDate', '')) if status != "NO_BUILDS" else 0
-                    start_date = convert_time(last_build.get('startDate', '')) if status != "NO_BUILDS" else 0
-                    BUILD_STATUS_GAUGE.labels(
-                        template_id=template_id,
-                        build_type_name=cfg["name"],
-                        build_type_id=cfg["id"],
-                        build_url=cfg["webUrl"],
-                        finish_date=finish_date,
-                        start_date=start_date
-                    ).set(status_value)
+
+                    _set_build_metrics(template_id, cfg, last_build)
+
             for k, v in all_projects.items():
                 if v['startDate']:
                     full_duration = build_duration_seconds(v)
@@ -465,6 +462,7 @@ def fetch_and_update_full_metrics():
                             project_name=v["project_name"],
                             finished_number=v['finished_number']
                         ).set(full_duration)
+
         except Exception as e:
             logging.error(f"Error in full metrics update: {e}")
 
@@ -478,13 +476,11 @@ def fetch_and_update_status_metrics():
     This function runs more frequently than the full metrics update.
     """
     logging.info("Starting status metrics update thread")
-
     while True:
         try:
             update_build_status_metrics()
         except Exception as e:
             logging.error(f"Error in status metrics update: {e}")
-
         logging.info(f"Sleeping for {STATUS_SCRAPE_INTERVAL} seconds until next status update")
         time.sleep(STATUS_SCRAPE_INTERVAL)
 
@@ -500,15 +496,12 @@ if __name__ == "__main__":
     logging.info(f"Status metrics interval: {STATUS_SCRAPE_INTERVAL} seconds")
     logging.info(f"Full metrics interval: {SCRAPE_INTERVAL} seconds")
 
-    # Start thread for full metrics (JDK, durations, projects, status)
     full_metrics_thread = threading.Thread(target=fetch_and_update_full_metrics, daemon=True)
     full_metrics_thread.start()
 
-    # Start thread for fast status updates only
     status_metrics_thread = threading.Thread(target=fetch_and_update_status_metrics, daemon=True)
     status_metrics_thread.start()
 
-    # Keep main thread alive
     try:
         while True:
             time.sleep(1)
