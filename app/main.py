@@ -378,12 +378,12 @@ def _set_build_metrics(template_id, cfg, last_build):
     finish_date = convert_time(last_build.get('finishDate', '')) if status != "NO_BUILDS" else 0
     start_date = convert_time(last_build.get('startDate', '')) if status != "NO_BUILDS" else 0
 
-    labels = dict(
-        template_id=template_id,
-        build_type_name=cfg["name"],
-        build_type_id=cfg["id"],
-        build_url=cfg["webUrl"],
-    )
+    labels = {
+        "template_id": template_id,
+        "build_type_name": cfg["name"],
+        "build_type_id": cfg["id"],
+        "build_url": cfg["webUrl"],
+    }
 
     BUILD_STATUS_GAUGE.labels(**labels).set(status_value)
     BUILD_FINISH_DATE_GAUGE.labels(**labels).set(finish_date)
