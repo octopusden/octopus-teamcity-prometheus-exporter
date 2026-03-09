@@ -43,9 +43,7 @@ JDK_PROJECT_ID = os.environ.get("JDK_PROJECT_ID")
 SCRAPE_INTERVAL = int(os.environ.get("SCRAPE_INTERVAL", 84600))
 STATUS_SCRAPE_INTERVAL = int(os.environ.get("STATUS_SCRAPE_INTERVAL", 1800))  # 30 minutes by default
 METRICS_PORT = int(os.getenv("METRICS_PORT", "8000"))
-BUILD_LIMIT = os.environ.get("BUILD_LIMIT", None)
-if BUILD_LIMIT:
-    BUILD_LIMIT = int(BUILD_LIMIT)
+
 HEADERS = {
     "Authorization": f"Bearer {TOKEN}",
     "Accept": "application/json"
@@ -405,7 +403,7 @@ def update_build_status_metrics():
     try:
         archived_projects = get_archived_projects()
         for template_id in TEMPLATE_IDS:
-            build_configs = get_build_configs_from_template(template_id)[:BUILD_LIMIT]
+            build_configs = get_build_configs_from_template(template_id)
             for cfg in build_configs:
                 if cfg['projectId'] in archived_projects:
                     continue
@@ -420,7 +418,7 @@ def fetch_and_update_full_metrics():
     """
     Continuously refresh all Prometheus metrics by polling TeamCity.
     
-    Runs indefinitely: on each iteration this function updates JDK distribution metrics, iterates configured templates (respecting BUILD_LIMIT)
+    Runs indefinitely: on each iteration this function updates JDK distribution metrics, iterates configured templates
     to collect non-archived build configurations, updates per-build gauges (status, start/finish timestamps, duration), and aggregates
     project-chain durations for templates in STOP_PROJECT_CHAIN to populate per-project duration metrics. Archived projects are skipped;
     on error the iteration is logged and the loop sleeps SCRAPE_INTERVAL seconds before the next refresh.
@@ -433,7 +431,7 @@ def fetch_and_update_full_metrics():
             update_jdk_metrics()
 
             for template_id in TEMPLATE_IDS:
-                build_configs = get_build_configs_from_template(template_id)[:BUILD_LIMIT]
+                build_configs = get_build_configs_from_template(template_id)
                 for cfg in build_configs:
                     if cfg['projectId'] in archived_projects:
                         continue
