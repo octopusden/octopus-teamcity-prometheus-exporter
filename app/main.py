@@ -201,16 +201,13 @@ def build_duration_seconds(build):
 
 def get_project_url(projectid):
     """
-    Get the TeamCity project's web URL for the given project ID.
-
+    Retrieve the web URL for a TeamCity project by its project ID.
+    
     Parameters:
-        projectid (str): TeamCity project identifier as used by the REST API.
-
+        projectid (str): TeamCity project identifier.
+    
     Returns:
-        str or None: The project's `webUrl` reported by TeamCity, or `None` if the field is absent.
-
-    Raises:
-        requests.HTTPError: If the HTTP request to TeamCity returns a non-success status.
+        str or None: The project's `webUrl` string as reported by TeamCity, or `None` if the field is not present.
     """
     logging.debug("Reached get_project_url")
     data = _tc_get_json(f"/app/rest/projects/id:{projectid}", params={})
@@ -219,13 +216,13 @@ def get_project_url(projectid):
 
 def get_upstream_chain_nodes(build_id):
     """
-    Retrieve upstream snapshot-dependency build nodes for a TeamCity build.
-
+    Return the upstream snapshot-dependency build nodes for a TeamCity build.
+    
     Parameters:
-        build_id: TeamCity build ID whose upstream (snapshot) dependencies will be inspected.
-
+        build_id (int|str): TeamCity build ID whose upstream (snapshot) dependencies will be inspected.
+    
     Returns:
-        A list of build objects each containing `buildTypeId`, `id`, `number`, `startDate`, `finishDate`, and `status`, or `None` if no upstream builds are found.
+        list: List of upstream build objects containing `buildTypeId`, `id`, `number`, `startDate`, `finishDate`, and `status`, or `None` if no upstream builds are present.
     """
     locator = f"snapshotDependency:(to:(id:{build_id})),defaultFilter:false"
     data = _tc_get_json("/app/rest/builds", params={
@@ -275,13 +272,12 @@ def get_start_date_by_last_build_id(build_id):
 
 def get_all_build_configs():
     """
-    Retrieve non-archived build configurations from TeamCity, optionally limited to the configured JDK project and its subprojects.
-
+    Retrieve non-archived build configurations for the configured JDK project and its subprojects.
+    
+    Queries the TeamCity API for build types under the configured JDK project and filters out any configurations whose project is archived.
+    
     Returns:
-        list: Build configuration objects as returned by the TeamCity API, filtered to exclude configurations whose projects are archived.
-
-    Raises:
-        requests.HTTPError: If the HTTP request to the TeamCity API fails.
+        list: Build configuration objects as returned by the TeamCity API, excluding configurations belonging to archived projects.
     """
     logging.debug("Reached get_all_build_configs")
     archived_projects = get_archived_projects()
@@ -329,9 +325,9 @@ def get_jdk_version_for_build_config(build_type_id):
 
 def update_jdk_metrics():
     """
-    Update Prometheus gauges reflecting the total number of build configurations and their distribution by JDK version.
-
-    Collects all non-archived build configurations, sets TOTAL_BUILD_CONFIGS_GAUGE to the total count, and sets JDK_BUILD_CONFIGS_GAUGE for each observed JDK version with the number of configurations using that JDK. Errors encountered while retrieving data are logged and do not raise.
+    Update Prometheus gauges for total build configurations and their distribution by JDK version.
+    
+    Retrieves all non-archived build configurations, sets TOTAL_BUILD_CONFIGS_GAUGE to the total count, and sets JDK_BUILD_CONFIGS_GAUGE for each observed JDK version with the number of configurations using that JDK. Exceptions raised during retrieval or processing are caught and logged and do not propagate.
     """
     logging.info("Updating JDK metrics")
     try:
@@ -352,6 +348,15 @@ def update_jdk_metrics():
 
 
 def convert_time(dt_str=""):
+    """
+    Convert a TeamCity-style timestamp string into seconds since the Unix epoch.
+    
+    Parameters:
+        dt_str (str): Timestamp in the format "%Y%m%dT%H%M%S%z" (for example "20230101T123000+0000").
+    
+    Returns:
+        int: Epoch seconds for the parsed timestamp, or 0 if parsing fails or the input is invalid.
+    """
     try:
         dt = datetime.strptime(dt_str, "%Y%m%dT%H%M%S%z")
         return int(dt.timestamp())
@@ -362,8 +367,12 @@ def convert_time(dt_str=""):
 
 def _set_build_metrics(template_id, cfg, last_build):
     """
-    Helper: sets BUILD_STATUS_GAUGE, BUILD_FINISH_DATE_GAUGE, and BUILD_START_DATE_GAUGE
-    for a single build configuration based on the latest build result.
+    Set the per-build Prometheus metrics (status, finish date, and start date) for a single build configuration.
+    
+    Parameters:
+        template_id (str): TeamCity template identifier used as the `template_id` metric label.
+        cfg (dict): Build configuration dictionary; used to extract `name`, `id`, and `webUrl` for metric labels.
+        last_build (dict): Latest build dictionary; expected keys include `status`, `startDate`, and `finishDate`. When `status` is `"NO_BUILDS"`, start and finish dates are recorded as 0.
     """
     status = last_build['status']
     status_value = {"SUCCESS": 1, "FAILURE": 0, "NO_BUILDS": -1}.get(status, -1)
@@ -409,12 +418,12 @@ def update_build_status_metrics():
 
 def fetch_and_update_full_metrics():
     """
-    Continuously poll TeamCity and refresh all Prometheus gauges for builds, projects, and JDK distribution.
-
-    This function runs indefinitely: on each iteration it updates JDK-related metrics, iterates configured templates to
-    collect non-archived build configurations, records latest build status and successful build durations, aggregates
-    project-chain durations for templates in the stop-project chain, and updates project-level duration metrics.
-    It skips archived projects and pauses SCRAPE_INTERVAL seconds between iterations.
+    Continuously refresh all Prometheus metrics by polling TeamCity.
+    
+    Runs indefinitely: on each iteration this function updates JDK distribution metrics, iterates configured templates (respecting BUILD_LIMIT)
+    to collect non-archived build configurations, updates per-build gauges (status, start/finish timestamps, duration), and aggregates
+    project-chain durations for templates in STOP_PROJECT_CHAIN to populate per-project duration metrics. Archived projects are skipped;
+    on error the iteration is logged and the loop sleeps SCRAPE_INTERVAL seconds before the next refresh.
     """
     logging.info("Starting full metrics update thread")
     while True:
