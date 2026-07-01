@@ -47,9 +47,9 @@ JDK_PROJECT_ID = os.environ.get("JDK_PROJECT_ID")
 SCRAPE_INTERVAL = int(os.environ.get("SCRAPE_INTERVAL", 84600))
 STATUS_SCRAPE_INTERVAL = int(os.environ.get("STATUS_SCRAPE_INTERVAL", 1800))  # 30 minutes by default
 METRICS_PORT = int(os.getenv("METRICS_PORT", "8000"))
-# Per-request HTTP timeout (seconds) for all TeamCity REST calls. Bump for large subtrees
-# where a single paged query can be slow. Matches monit-tc's REQUEST_TIMEOUT default.
-REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "60"))
+# Per-request HTTP timeout (seconds) for all TeamCity REST calls. Large subtrees (e.g. the whole
+# RDDepartment over a 7d window) hit slow deep-pagination pages, so this is generous by default.
+REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "600"))  # 10 minutes
 # How many times to retry a REST call that hits a transient timeout/connection error, so one
 # slow page doesn't abort a whole multi-minute failed-builds cycle.
 REQUEST_RETRIES = int(os.environ.get("REQUEST_RETRIES", "2"))
@@ -63,7 +63,7 @@ RECIPES_PROJECT_ID = os.environ.get("RECIPES_PROJECT_ID", "") or PARENT_PROJECT_
 EXCLUDE_PROJECT_IDS = [p.strip() for p in os.environ.get("EXCLUDE_PROJECT_IDS", "").split(",") if p.strip()]
 WINDOW_DAYS = int(os.environ.get("WINDOW_DAYS", "7"))
 PAGE_SIZE = int(os.environ.get("PAGE_SIZE", "100"))
-FAILED_BUILDS_SCRAPE_INTERVAL = int(os.environ.get("FAILED_BUILDS_SCRAPE_INTERVAL", "1800"))
+FAILED_BUILDS_SCRAPE_INTERVAL = int(os.environ.get("FAILED_BUILDS_SCRAPE_INTERVAL", "86400"))  # 24 hours
 # Parallelism for the per-(config, branch) recovery check. Matches monit-tc's MAX_WORKERS.
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "8"))
 
