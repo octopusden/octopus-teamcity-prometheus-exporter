@@ -4,8 +4,10 @@ import requests
 import threading
 from prometheus_client import start_http_server, Gauge, Summary
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import json
+import re
+import base64
 
 
 def get_log_level():
@@ -45,6 +47,20 @@ SCRAPE_INTERVAL = int(os.environ.get("SCRAPE_INTERVAL", 84600))
 STATUS_SCRAPE_INTERVAL = int(os.environ.get("STATUS_SCRAPE_INTERVAL", 1800))  # 30 minutes by default
 METRICS_PORT = int(os.getenv("METRICS_PORT", "8000"))
 
+# --- Failed-builds-by-meta-runner feature (mirrors tc-build-steps-monitoring fetch) ---
+# Scan the PARENT_PROJECT_ID subtree for builds that FAILED in the last WINDOW_DAYS, keep only
+# configs that run a monitored meta-runner (recipe), dedup per (config, branch) -> latest failure.
+PARENT_PROJECT_ID = os.environ.get("PARENT_PROJECT_ID", JDK_PROJECT_ID or "")
+META_RUNNER_IDS = [m.strip() for m in os.environ.get("META_RUNNER_IDS", "").split(",") if m.strip()]
+RECIPES_PROJECT_ID = os.environ.get("RECIPES_PROJECT_ID", "") or PARENT_PROJECT_ID
+EXCLUDE_PROJECT_IDS = [p.strip() for p in os.environ.get("EXCLUDE_PROJECT_IDS", "").split(",") if p.strip()]
+WINDOW_DAYS = int(os.environ.get("WINDOW_DAYS", "7"))
+PAGE_SIZE = int(os.environ.get("PAGE_SIZE", "100"))
+FAILED_BUILDS_SCRAPE_INTERVAL = int(os.environ.get("FAILED_BUILDS_SCRAPE_INTERVAL", "1800"))
+
+# Recipe (meta-runner) id as it appears on the project recipe admin page: editRecipeId=<id>.
+_RECIPE_ID_RE = re.compile(r"editRecipeId=([A-Za-z0-9_.\-]+)")
+
 HEADERS = {
     "Authorization": f"Bearer {TOKEN}",
     "Accept": "application/json"
@@ -79,6 +95,30 @@ JDK_BUILD_CONFIGS_GAUGE = Gauge(
     ["jdk_version"]
 )
 
+# One series per (config, branch) whose LATEST build in the window is a failure, for configs
+# that run a monitored meta-runner. Value is always 1; absence means "not currently failing".
+# Mirrors the fetch+dedup of tc-build-steps-monitoring (monit-tc).
+#
+# Identity labels are STABLE across builds (no build number/url) so a config that stays red
+# is ONE continuous series -> smooth graphs and `for:`-based alerts work. The volatile
+# per-build detail (number + direct url) lives in FAILED_BUILD_INFO and is joined at query
+# time on (build_type_id, branch).
+FAILED_BUILD_GAUGE = Gauge(
+    "teamcity_failed_build",
+    "Currently-failing (config, branch) in the last WINDOW_DAYS for configs using a "
+    "monitored meta-runner. Value=1 means currently failing.",
+    ["build_type_id", "build_type_name", "project_name", "branch", "build_url", "meta_runner_ids"]
+)
+
+# Info metric: latest failing build's number + direct URL per (config, branch). Value always 1.
+# NOT for alerting/graphing (build_number churns) — it's a lookup joined to FAILED_BUILD via
+#   teamcity_failed_build * on(build_type_id,branch) group_left(build_number,build_url) teamcity_failed_build_info
+FAILED_BUILD_INFO = Gauge(
+    "teamcity_failed_build_info",
+    "Detail (build number + direct URL) of the latest failing build per (config, branch).",
+    ["build_type_id", "branch", "build_number", "build_url"]
+)
+
 
 def _tc_get_json(path, params=None, timeout=30):
     """
@@ -100,6 +140,212 @@ def _tc_get_json(path, params=None, timeout=30):
     r = requests.get(url, headers=HEADERS, params=params, timeout=timeout)
     r.raise_for_status()
     return r.json()
+
+
+# ===== Failed-builds-by-meta-runner (mirrors tc-build-steps-monitoring) =====
+
+def _tc_paged(path, item_key, params=None):
+    """Yield items from a paged TeamCity collection, following nextHref.
+
+    ``item_key`` is the singular element name (e.g. 'build', 'buildType'). nextHref already
+    encodes locator + start/count, so params are only sent on the first request.
+    """
+    next_path = path
+    next_params = dict(params or {})
+    while next_path:
+        data = _tc_get_json(next_path, params=next_params)
+        for item in data.get(item_key, []) or []:
+            yield item
+        next_path = data.get("nextHref") or None
+        next_params = None
+
+
+def get_recipe_ids(project_id):
+    """Discover meta-runner (recipe) ids from a project's recipe admin page.
+
+    There is no REST endpoint for recipes, so we scrape /admin/editProject.html and extract
+    ``editRecipeId=<id>``. Needs project-settings view access; in prod the service account
+    usually lacks it, so this fails gracefully and we fall back to META_RUNNER_IDS.
+    """
+    url = f"{TEAMCITY_URL.rstrip('/')}/admin/editProject.html?projectId={project_id}&tab=recipe"
+    r = requests.get(url, headers={**HEADERS, "Accept": "text/html"}, timeout=30)
+    r.raise_for_status()
+    return sorted(set(_RECIPE_ID_RE.findall(r.text)))
+
+
+def resolve_meta_runner_ids():
+    """Monitored set = auto-discovered recipe ids UNION explicit META_RUNNER_IDS."""
+    discovered = []
+    try:
+        discovered = get_recipe_ids(RECIPES_PROJECT_ID)
+    except Exception as e:
+        logging.warning(f"Recipe discovery from {RECIPES_PROJECT_ID} failed: {e}")
+    combined = sorted(set(discovered) | set(META_RUNNER_IDS))
+    logging.info(
+        f"Monitoring {len(combined)} meta-runner(s): {len(discovered)} discovered "
+        f"+ {len(META_RUNNER_IDS)} explicit"
+    )
+    return combined
+
+
+def enumerate_candidate_configs(meta_runner_ids):
+    """All configs in the PARENT_PROJECT_ID subtree that have an ENABLED step whose runType
+    (step.type) is one of the monitored meta-runner ids. Keyed by build config id.
+    """
+    meta_set = set(meta_runner_ids)
+    excluded = set(EXCLUDE_PROJECT_IDS)
+    params = {
+        "locator": f"affectedProject:(id:{PARENT_PROJECT_ID})",
+        "fields": "buildType(id,name,projectName,webUrl,projectId,steps(step(id,name,type,disabled))),nextHref",
+        "count": str(PAGE_SIZE),
+    }
+    configs = {}
+    for bt in _tc_paged("/app/rest/buildTypes", "buildType", params):
+        if bt.get("projectId") in excluded:
+            continue
+        steps = (bt.get("steps") or {}).get("step", []) or []
+        monitored = sorted({
+            s.get("type")
+            for s in steps
+            if s.get("type") in meta_set and s.get("disabled") is not True
+        })
+        if monitored:
+            configs[bt.get("id")] = {
+                "name": bt.get("name", ""),
+                "project_name": bt.get("projectName", ""),
+                "web_url": bt.get("webUrl", ""),
+                "meta_runner_ids": ",".join(monitored),
+            }
+    return configs
+
+
+def iter_failed_builds(since):
+    """Failed builds (all branches) in the subtree that finished after ``since`` (a tz-aware
+    datetime). Same locator as monit-tc's iter_failed_builds.
+    """
+    date_str = since.strftime("%Y%m%dT%H%M%S%z")
+    locator = (
+        f"affectedProject:(id:{PARENT_PROJECT_ID}),"
+        "status:FAILURE,"
+        "branch:(default:any),"
+        f"finishDate:(date:{date_str},condition:after)"
+    )
+    params = {
+        "locator": locator,
+        "fields": "build(id,number,buildTypeId,branchName,webUrl,finishDate),nextHref",
+        "count": str(PAGE_SIZE),
+    }
+    return _tc_paged("/app/rest/builds", "build", params)
+
+
+def _branch_locator(branch_name):
+    """A branch locator dimension, base64-encoding the name so special characters
+    (commas, colons, parens, slashes) can't break the locator syntax. Mirrors monit-tc.
+    """
+    if not branch_name or branch_name == "<default>":
+        return "branch:(default:true)"
+    b64 = base64.urlsafe_b64encode(branch_name.encode("utf-8")).decode("ascii").rstrip("=")
+    return f"branch:(name:($base64:{b64}))"
+
+
+def latest_build_on_branch(config_id, branch_name):
+    """The most recent build on a given branch (ANY status), or None.
+
+    Used to check whether a (config, branch) that failed within the window has since
+    RECOVERED. Mirrors monit-tc's latest_build_on_branch used by compute_current_failures.
+    """
+    data = _tc_get_json("/app/rest/builds", params={
+        "locator": f"buildType:(id:{config_id}),{_branch_locator(branch_name)},count:1",
+        "fields": "build(id,number,status,buildTypeId,branchName,webUrl,finishDate)"
+    })
+    builds = data.get("build") or []
+    return builds[0] if builds else None
+
+
+def update_failed_build_metrics(meta_runner_ids):
+    """Refresh FAILED_BUILD_GAUGE: one series per (candidate config, branch) that is
+    CURRENTLY failing -- i.e. failed within the window AND whose latest build on that branch
+    is still FAILURE (not yet recovered). Mirrors monit-tc's fetch+dedup+compute_current_failures.
+    """
+    configs = enumerate_candidate_configs(meta_runner_ids)
+    logging.info(f"Candidate configs (use a monitored meta-runner): {len(configs)}")
+
+    since = datetime.now(timezone.utc) - timedelta(days=WINDOW_DAYS)
+
+    # Dedup per (build_type_id, branch) -> latest by finishDate (fixed-width => lexicographic
+    # compare == chronological), matching monit-tc.partition_builds.
+    latest = {}
+    for b in iter_failed_builds(since):
+        btid = b.get("buildTypeId", "")
+        if btid not in configs:
+            continue  # not a candidate config (doesn't run our meta-runner)
+        branch = b.get("branchName", "") or "<default>"
+        key = (btid, branch)
+        prev = latest.get(key)
+        if prev is None or (b.get("finishDate", "") > prev.get("finishDate", "")):
+            latest[key] = b
+
+    # Recovery check (mirrors monit-tc.compute_current_failures): a (config, branch) counts as
+    # failing only if its LATEST build on that branch is still FAILURE. iter_failed_builds
+    # returns FAILURE builds only, so without this we would keep configs that already went
+    # green again within the window. One cheap extra query per failing (config, branch).
+    current = {}
+    for (btid, branch) in latest:
+        try:
+            newest = latest_build_on_branch(btid, branch)
+        except Exception as e:
+            # Don't lose a real failure on a transient API error; keep the windowed failure.
+            logging.warning(f"Latest-build check failed for {btid}@{branch}: {e}; keeping as failing")
+            current[(btid, branch)] = latest[(btid, branch)]
+            continue
+        if newest is None or newest.get("status") != "FAILURE":
+            continue  # recovered (latest build is green) or gone -> not currently failing
+        current[(btid, branch)] = newest  # newest IS the current red build
+
+    FAILED_BUILD_GAUGE.clear()
+    FAILED_BUILD_INFO.clear()
+    for (btid, branch), b in current.items():
+        c = configs[btid]
+        # Stable identity -> continuous series while the config stays red.
+        FAILED_BUILD_GAUGE.labels(
+            build_type_id=btid,
+            build_type_name=c["name"],
+            project_name=c["project_name"],
+            branch=branch,
+            build_url=c["web_url"],  # config page (stable), NOT the per-build url
+            meta_runner_ids=c["meta_runner_ids"],
+        ).set(1)
+        # Volatile per-build detail, joined back on (build_type_id, branch) at query time.
+        FAILED_BUILD_INFO.labels(
+            build_type_id=btid,
+            branch=branch,
+            build_number=b.get("number", ""),
+            build_url=b.get("webUrl", "") or c["web_url"],
+        ).set(1)
+    logging.info(
+        f"Currently-failing (config+branch, latest build still red) exposed: {len(current)} "
+        f"(of {len(latest)} that failed within the {WINDOW_DAYS}d window)"
+    )
+
+
+def fetch_and_update_failed_builds():
+    """Continuously refresh the failed-builds-by-meta-runner metric."""
+    logging.info("Starting failed-builds (meta-runner) update thread")
+    while True:
+        try:
+            meta_runner_ids = resolve_meta_runner_ids()
+            if not meta_runner_ids:
+                logging.warning(
+                    "No meta-runner ids (discovery empty and META_RUNNER_IDS unset); "
+                    "skipping failed-builds update"
+                )
+            else:
+                update_failed_build_metrics(meta_runner_ids)
+        except Exception as e:
+            logging.error(f"Error in failed-builds update: {e}")
+
+        logging.info(f"Sleeping for {FAILED_BUILDS_SCRAPE_INTERVAL} seconds until next failed-builds update")
+        time.sleep(FAILED_BUILDS_SCRAPE_INTERVAL)
 
 
 def get_build_configs_from_template(template_id):
@@ -491,6 +737,17 @@ if __name__ == "__main__":
     # Start thread for fast status updates only
     status_metrics_thread = threading.Thread(target=fetch_and_update_status_metrics, daemon=True)
     status_metrics_thread.start()
+
+    # Start thread for failed-builds-by-meta-runner (optional; mirrors tc-build-steps-monitoring)
+    if PARENT_PROJECT_ID and (META_RUNNER_IDS or RECIPES_PROJECT_ID):
+        logging.info(
+            f"Failed-builds feature enabled: parent={PARENT_PROJECT_ID}, "
+            f"window={WINDOW_DAYS}d, interval={FAILED_BUILDS_SCRAPE_INTERVAL}s"
+        )
+        failed_builds_thread = threading.Thread(target=fetch_and_update_failed_builds, daemon=True)
+        failed_builds_thread.start()
+    else:
+        logging.info("Failed-builds feature disabled (set PARENT_PROJECT_ID and META_RUNNER_IDS to enable)")
 
     # Keep main thread alive
     try:
