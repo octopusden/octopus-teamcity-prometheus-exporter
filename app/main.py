@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import re
 import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 def get_log_level():
@@ -49,6 +50,9 @@ METRICS_PORT = int(os.getenv("METRICS_PORT", "8000"))
 # Per-request HTTP timeout (seconds) for all TeamCity REST calls. Bump for large subtrees
 # where a single paged query can be slow. Matches monit-tc's REQUEST_TIMEOUT default.
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "60"))
+# How many times to retry a REST call that hits a transient timeout/connection error, so one
+# slow page doesn't abort a whole multi-minute failed-builds cycle.
+REQUEST_RETRIES = int(os.environ.get("REQUEST_RETRIES", "2"))
 
 # --- Failed-builds-by-meta-runner feature (mirrors tc-build-steps-monitoring fetch) ---
 # Scan the PARENT_PROJECT_ID subtree for builds that FAILED in the last WINDOW_DAYS, keep only
@@ -60,6 +64,8 @@ EXCLUDE_PROJECT_IDS = [p.strip() for p in os.environ.get("EXCLUDE_PROJECT_IDS", 
 WINDOW_DAYS = int(os.environ.get("WINDOW_DAYS", "7"))
 PAGE_SIZE = int(os.environ.get("PAGE_SIZE", "100"))
 FAILED_BUILDS_SCRAPE_INTERVAL = int(os.environ.get("FAILED_BUILDS_SCRAPE_INTERVAL", "1800"))
+# Parallelism for the per-(config, branch) recovery check. Matches monit-tc's MAX_WORKERS.
+MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "8"))
 
 # Recipe (meta-runner) id as it appears on the project recipe admin page: editRecipeId=<id>.
 _RECIPE_ID_RE = re.compile(r"editRecipeId=([A-Za-z0-9_.\-]+)")
@@ -142,9 +148,20 @@ def _tc_get_json(path, params=None, timeout=None):
     if timeout is None:
         timeout = REQUEST_TIMEOUT
     url = f"{TEAMCITY_URL.rstrip('/')}{path}"
-    r = requests.get(url, headers=HEADERS, params=params, timeout=timeout)
-    r.raise_for_status()
-    return r.json()
+    # Retry transient timeouts/connection errors (a single slow page shouldn't abort a whole
+    # multi-minute cycle). HTTP errors (401/404/...) are NOT retried -- they re-raise at once.
+    last_exc = None
+    for attempt in range(REQUEST_RETRIES + 1):
+        try:
+            r = requests.get(url, headers=HEADERS, params=params, timeout=timeout)
+            r.raise_for_status()
+            return r.json()
+        except (requests.Timeout, requests.ConnectionError) as e:
+            last_exc = e
+            if attempt < REQUEST_RETRIES:
+                logging.warning(f"Transient error on {path} ({e}); retry {attempt + 1}/{REQUEST_RETRIES}")
+                time.sleep(2 * (attempt + 1))
+    raise last_exc
 
 
 # ===== Failed-builds-by-meta-runner (mirrors tc-build-steps-monitoring) =====
@@ -267,6 +284,22 @@ def latest_build_on_branch(config_id, branch_name):
     return builds[0] if builds else None
 
 
+def _check_still_failing(key, windowed_failure):
+    """Recovery check for one (config, branch). Returns (key, build_to_expose_or_None):
+    the current build if latest is still FAILURE; the windowed failure on API error
+    (fail-safe: don't drop a real failure); None if recovered/gone.
+    """
+    btid, branch = key
+    try:
+        newest = latest_build_on_branch(btid, branch)
+    except Exception as e:
+        logging.warning(f"Latest-build check failed for {btid}@{branch}: {e}; keeping as failing")
+        return key, windowed_failure
+    if newest is None or newest.get("status") != "FAILURE":
+        return key, None  # recovered (latest build is green) or gone -> not currently failing
+    return key, newest  # newest IS the current red build
+
+
 def update_failed_build_metrics(meta_runner_ids):
     """Refresh FAILED_BUILD_GAUGE: one series per (candidate config, branch) that is
     CURRENTLY failing -- i.e. failed within the window AND whose latest build on that branch
@@ -293,19 +326,17 @@ def update_failed_build_metrics(meta_runner_ids):
     # Recovery check (mirrors monit-tc.compute_current_failures): a (config, branch) counts as
     # failing only if its LATEST build on that branch is still FAILURE. iter_failed_builds
     # returns FAILURE builds only, so without this we would keep configs that already went
-    # green again within the window. One cheap extra query per failing (config, branch).
+    # green again within the window. One query per failing (config, branch) -> run in parallel
+    # (MAX_WORKERS) since at large subtree scale a serial pass is prohibitively slow.
     current = {}
-    for (btid, branch) in latest:
-        try:
-            newest = latest_build_on_branch(btid, branch)
-        except Exception as e:
-            # Don't lose a real failure on a transient API error; keep the windowed failure.
-            logging.warning(f"Latest-build check failed for {btid}@{branch}: {e}; keeping as failing")
-            current[(btid, branch)] = latest[(btid, branch)]
-            continue
-        if newest is None or newest.get("status") != "FAILURE":
-            continue  # recovered (latest build is green) or gone -> not currently failing
-        current[(btid, branch)] = newest  # newest IS the current red build
+    if latest:
+        logging.info(f"Recovery check on {len(latest)} (config, branch) with {MAX_WORKERS} workers")
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            futures = [pool.submit(_check_still_failing, key, b) for key, b in latest.items()]
+            for fut in as_completed(futures):
+                key, build = fut.result()
+                if build is not None:
+                    current[key] = build
 
     FAILED_BUILD_GAUGE.clear()
     FAILED_BUILD_INFO.clear()
