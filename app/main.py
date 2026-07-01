@@ -46,6 +46,9 @@ JDK_PROJECT_ID = os.environ.get("JDK_PROJECT_ID")
 SCRAPE_INTERVAL = int(os.environ.get("SCRAPE_INTERVAL", 84600))
 STATUS_SCRAPE_INTERVAL = int(os.environ.get("STATUS_SCRAPE_INTERVAL", 1800))  # 30 minutes by default
 METRICS_PORT = int(os.getenv("METRICS_PORT", "8000"))
+# Per-request HTTP timeout (seconds) for all TeamCity REST calls. Bump for large subtrees
+# where a single paged query can be slow. Matches monit-tc's REQUEST_TIMEOUT default.
+REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "60"))
 
 # --- Failed-builds-by-meta-runner feature (mirrors tc-build-steps-monitoring fetch) ---
 # Scan the PARENT_PROJECT_ID subtree for builds that FAILED in the last WINDOW_DAYS, keep only
@@ -120,7 +123,7 @@ FAILED_BUILD_INFO = Gauge(
 )
 
 
-def _tc_get_json(path, params=None, timeout=30):
+def _tc_get_json(path, params=None, timeout=None):
     """
     Fetch JSON from the TeamCity REST API for the given path and return the parsed response.
 
@@ -136,6 +139,8 @@ def _tc_get_json(path, params=None, timeout=30):
         requests.HTTPError: If the HTTP response status indicates an error.
         requests.RequestException: For other request-related errors (connection, timeout, etc.).
     """
+    if timeout is None:
+        timeout = REQUEST_TIMEOUT
     url = f"{TEAMCITY_URL.rstrip('/')}{path}"
     r = requests.get(url, headers=HEADERS, params=params, timeout=timeout)
     r.raise_for_status()
@@ -168,7 +173,7 @@ def get_recipe_ids(project_id):
     usually lacks it, so this fails gracefully and we fall back to META_RUNNER_IDS.
     """
     url = f"{TEAMCITY_URL.rstrip('/')}/admin/editProject.html?projectId={project_id}&tab=recipe"
-    r = requests.get(url, headers={**HEADERS, "Accept": "text/html"}, timeout=30)
+    r = requests.get(url, headers={**HEADERS, "Accept": "text/html"}, timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
     return sorted(set(_RECIPE_ID_RE.findall(r.text)))
 
@@ -646,9 +651,11 @@ def fetch_and_update_full_metrics():
     logging.info("Starting full metrics update thread")
 
     while True:
-        archived_projects = get_archived_projects()
         all_projects = {}
         try:
+            # Inside try so a transient API error (e.g. 401/network) is caught and retried
+            # next interval instead of killing this thread permanently.
+            archived_projects = get_archived_projects()
             # Update JDK metrics
             update_jdk_metrics()
 
