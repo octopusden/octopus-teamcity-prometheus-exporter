@@ -107,24 +107,15 @@ JDK_BUILD_CONFIGS_GAUGE = Gauge(
 # One series per (config, branch) whose LATEST build in the window is a failure, for configs
 # that run a monitored meta-runner. Value is always 1; absence means "not currently failing".
 #
-# Identity labels are STABLE across builds (no build number/url) so a config that stays red
-# is ONE continuous series -> smooth graphs and `for:`-based alerts work. The volatile
-# per-build detail (number + direct url) lives in FAILED_BUILD_INFO and is joined at query
-# time on (build_type_id, branch).
+# Identity labels are STABLE across builds (no build number) so a config that stays red is ONE
+# continuous series -> smooth graphs and `for:`-based alerts work. build_url is the build
+# configuration (buildType) page URL, which is stable. Per-build number/url are intentionally
+# NOT exposed — drill down to a specific failing build via TeamCity instead.
 FAILED_BUILD_GAUGE = Gauge(
     "teamcity_failed_build",
     "Currently-failing (config, branch) in the last WINDOW_DAYS for configs using a "
     "monitored meta-runner. Value=1 means currently failing.",
     ["build_type_id", "build_type_name", "project_name", "branch", "build_url", "meta_runner_ids"]
-)
-
-# Info metric: latest failing build's number + direct URL per (config, branch). Value always 1.
-# NOT for alerting/graphing (build_number churns) — it's a lookup joined to FAILED_BUILD via
-#   teamcity_failed_build * on(build_type_id,branch) group_left(build_number,build_url) teamcity_failed_build_info
-FAILED_BUILD_INFO = Gauge(
-    "teamcity_failed_build_info",
-    "Detail (build number + direct URL) of the latest failing build per (config, branch).",
-    ["build_type_id", "branch", "build_number", "build_url"]
 )
 
 
@@ -402,8 +393,7 @@ def update_failed_build_metrics(meta_runner_ids):
                     current[key] = (build, attributed)
 
     FAILED_BUILD_GAUGE.clear()
-    FAILED_BUILD_INFO.clear()
-    for (btid, branch), (b, attributed) in current.items():
+    for (btid, branch), (_build, attributed) in current.items():
         c = configs[btid]
         # Label with the meta-runner(s) that actually failed; fall back to the config's full
         # monitored list when the failing step couldn't be attributed to a monitored meta-runner.
@@ -414,15 +404,8 @@ def update_failed_build_metrics(meta_runner_ids):
             build_type_name=c["name"],
             project_name=c["project_name"],
             branch=branch,
-            build_url=c["web_url"],  # config page (stable), NOT the per-build url
+            build_url=c["web_url"],  # build config (buildType) page URL, stable
             meta_runner_ids=meta,
-        ).set(1)
-        # Volatile per-build detail, joined back on (build_type_id, branch) at query time.
-        FAILED_BUILD_INFO.labels(
-            build_type_id=btid,
-            branch=branch,
-            build_number=b.get("number", ""),
-            build_url=b.get("webUrl", "") or c["web_url"],
         ).set(1)
     logging.info(
         f"Currently-failing (config+branch, latest build still red) exposed: {len(current)} "
