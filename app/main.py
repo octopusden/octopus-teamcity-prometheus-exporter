@@ -54,7 +54,7 @@ REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "600"))  # 10 minutes
 # slow page doesn't abort a whole multi-minute failed-builds cycle.
 REQUEST_RETRIES = int(os.environ.get("REQUEST_RETRIES", "2"))
 
-# --- Failed-builds-by-meta-runner feature (mirrors tc-build-steps-monitoring fetch) ---
+# --- Failed-builds-by-meta-runner feature ---
 # Scan the PARENT_PROJECT_ID subtree for builds that FAILED in the last WINDOW_DAYS, keep only
 # configs that run a monitored meta-runner (recipe), dedup per (config, branch) -> latest failure.
 PARENT_PROJECT_ID = os.environ.get("PARENT_PROJECT_ID", JDK_PROJECT_ID or "")
@@ -64,7 +64,7 @@ EXCLUDE_PROJECT_IDS = [p.strip() for p in os.environ.get("EXCLUDE_PROJECT_IDS", 
 WINDOW_DAYS = int(os.environ.get("WINDOW_DAYS", "7"))
 PAGE_SIZE = int(os.environ.get("PAGE_SIZE", "100"))
 FAILED_BUILDS_SCRAPE_INTERVAL = int(os.environ.get("FAILED_BUILDS_SCRAPE_INTERVAL", "86400"))  # 24 hours
-# Parallelism for the per-(config, branch) recovery check. Matches monit-tc's MAX_WORKERS.
+# Parallelism for the per-(config, branch) recovery check.
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "8"))
 
 # Recipe (meta-runner) id as it appears on the project recipe admin page: editRecipeId=<id>.
@@ -106,7 +106,6 @@ JDK_BUILD_CONFIGS_GAUGE = Gauge(
 
 # One series per (config, branch) whose LATEST build in the window is a failure, for configs
 # that run a monitored meta-runner. Value is always 1; absence means "not currently failing".
-# Mirrors the fetch+dedup of tc-build-steps-monitoring (monit-tc).
 #
 # Identity labels are STABLE across builds (no build number/url) so a config that stays red
 # is ONE continuous series -> smooth graphs and `for:`-based alerts work. The volatile
@@ -164,7 +163,7 @@ def _tc_get_json(path, params=None, timeout=None):
     raise last_exc
 
 
-# ===== Failed-builds-by-meta-runner (mirrors tc-build-steps-monitoring) =====
+# ===== Failed-builds-by-meta-runner =====
 
 def _tc_paged(path, item_key, params=None):
     """Yield items from a paged TeamCity collection, following nextHref.
@@ -243,7 +242,7 @@ def enumerate_candidate_configs(meta_runner_ids):
 
 def iter_failed_builds(since):
     """Failed builds (all branches) in the subtree that finished after ``since`` (a tz-aware
-    datetime). Same locator as monit-tc's iter_failed_builds.
+    datetime).
     """
     date_str = since.strftime("%Y%m%dT%H%M%S%z")
     locator = (
@@ -262,7 +261,7 @@ def iter_failed_builds(since):
 
 def _branch_locator(branch_name):
     """A branch locator dimension, base64-encoding the name so special characters
-    (commas, colons, parens, slashes) can't break the locator syntax. Mirrors monit-tc.
+    (commas, colons, parens, slashes) can't break the locator syntax.
     """
     if not branch_name or branch_name == "<default>":
         return "branch:(default:true)"
@@ -274,7 +273,7 @@ def latest_build_on_branch(config_id, branch_name):
     """The most recent build on a given branch (ANY status), or None.
 
     Used to check whether a (config, branch) that failed within the window has since
-    RECOVERED. Mirrors monit-tc's latest_build_on_branch used by compute_current_failures.
+    RECOVERED.
     """
     data = _tc_get_json("/app/rest/builds", params={
         "locator": f"buildType:(id:{config_id}),{_branch_locator(branch_name)},count:1",
@@ -303,7 +302,7 @@ def _check_still_failing(key, windowed_failure):
 def update_failed_build_metrics(meta_runner_ids):
     """Refresh FAILED_BUILD_GAUGE: one series per (candidate config, branch) that is
     CURRENTLY failing -- i.e. failed within the window AND whose latest build on that branch
-    is still FAILURE (not yet recovered). Mirrors monit-tc's fetch+dedup+compute_current_failures.
+    is still FAILURE (not yet recovered).
     """
     configs = enumerate_candidate_configs(meta_runner_ids)
     logging.info(f"Candidate configs (use a monitored meta-runner): {len(configs)}")
@@ -311,7 +310,7 @@ def update_failed_build_metrics(meta_runner_ids):
     since = datetime.now(timezone.utc) - timedelta(days=WINDOW_DAYS)
 
     # Dedup per (build_type_id, branch) -> latest by finishDate (fixed-width => lexicographic
-    # compare == chronological), matching monit-tc.partition_builds.
+    # compare == chronological).
     latest = {}
     for b in iter_failed_builds(since):
         btid = b.get("buildTypeId", "")
@@ -323,7 +322,7 @@ def update_failed_build_metrics(meta_runner_ids):
         if prev is None or (b.get("finishDate", "") > prev.get("finishDate", "")):
             latest[key] = b
 
-    # Recovery check (mirrors monit-tc.compute_current_failures): a (config, branch) counts as
+    # Recovery check: a (config, branch) counts as
     # failing only if its LATEST build on that branch is still FAILURE. iter_failed_builds
     # returns FAILURE builds only, so without this we would keep configs that already went
     # green again within the window. One query per failing (config, branch) -> run in parallel
@@ -776,7 +775,7 @@ if __name__ == "__main__":
     status_metrics_thread = threading.Thread(target=fetch_and_update_status_metrics, daemon=True)
     status_metrics_thread.start()
 
-    # Start thread for failed-builds-by-meta-runner (optional; mirrors tc-build-steps-monitoring)
+    # Start thread for failed-builds-by-meta-runner (optional)
     if PARENT_PROJECT_ID and (META_RUNNER_IDS or RECIPES_PROJECT_ID):
         logging.info(
             f"Failed-builds feature enabled: parent={PARENT_PROJECT_ID}, "
