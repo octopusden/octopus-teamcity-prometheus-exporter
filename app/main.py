@@ -225,17 +225,21 @@ def enumerate_candidate_configs(meta_runner_ids):
         if bt.get("projectId") in excluded:
             continue
         steps = (bt.get("steps") or {}).get("step", []) or []
-        monitored = sorted({
-            s.get("type")
+        # step_id -> meta_runner_id, for enabled steps that ARE a monitored meta-runner.
+        # Used later to attribute a build failure to the specific meta-runner step that failed.
+        step_types = {
+            s.get("id"): s.get("type")
             for s in steps
-            if s.get("type") in meta_set and s.get("disabled") is not True
-        })
+            if s.get("type") in meta_set and s.get("disabled") is not True and s.get("id")
+        }
+        monitored = sorted(set(step_types.values()))
         if monitored:
             configs[bt.get("id")] = {
                 "name": bt.get("name", ""),
                 "project_name": bt.get("projectName", ""),
                 "web_url": bt.get("webUrl", ""),
                 "meta_runner_ids": ",".join(monitored),
+                "step_types": step_types,
             }
     return configs
 
@@ -283,20 +287,77 @@ def latest_build_on_branch(config_id, branch_name):
     return builds[0] if builds else None
 
 
-def _check_still_failing(key, windowed_failure):
-    """Recovery check for one (config, branch). Returns (key, build_to_expose_or_None):
-    the current build if latest is still FAILURE; the windowed failure on API error
-    (fail-safe: don't drop a real failure); None if recovered/gone.
+_STEP_STATUS_PREFIX = "teamcity.build.step.status."
+
+
+def get_failed_step_ids(build_id):
+    """Step ids whose resulting status is 'failure' for a build.
+
+    Reads the build's resulting-properties, where TeamCity records each step's outcome as
+    ``teamcity.build.step.status.<stepId> = success|failure``.
+    """
+    props = _tc_paged(
+        f"/app/rest/builds/id:{build_id}/resulting-properties",
+        "property",
+        {"fields": "property(name,value),nextHref"},
+    )
+    failed = set()
+    for p in props:
+        name = p.get("name", "")
+        if name.startswith(_STEP_STATUS_PREFIX) and p.get("value") == "failure":
+            sid = name[len(_STEP_STATUS_PREFIX):]
+            if sid:
+                failed.add(sid)
+    return failed
+
+
+def attribute_failed_meta_runners(failed_step_ids, step_types):
+    """Map failed step ids to the monitored meta-runner ids that actually failed.
+
+    ``step_types`` is the config's {step_id: meta_runner_id} for monitored steps. A failed
+    status id matches a step either exactly, or as an inner sub-step ``<stepId>_<...>``.
+    Returns a sorted list (possibly empty when no monitored meta-runner step failed).
+    """
+    if not failed_step_ids or not step_types:
+        return []
+    ids_by_len = sorted(step_types, key=len, reverse=True)  # longest first, avoid prefix clashes
+    hits = set()
+    for raw in failed_step_ids:
+        if raw in step_types:
+            hits.add(step_types[raw])
+        else:
+            for sid in ids_by_len:
+                if raw.startswith(sid + "_"):
+                    hits.add(step_types[sid])
+                    break
+    return sorted(hits)
+
+
+def _check_still_failing(key, windowed_failure, step_types):
+    """Recovery check for one (config, branch). Returns (key, build_or_None, meta_runners_or_None):
+    - build: the current build if latest is still FAILURE; the windowed failure on API error
+      (fail-safe: don't drop a real failure); None if recovered/gone.
+    - meta_runners: comma-joined meta-runner id(s) whose step actually failed in that build,
+      or None to fall back to the config-level list (failure not at a monitored meta-runner,
+      or the step-status lookup errored).
     """
     btid, branch = key
     try:
         newest = latest_build_on_branch(btid, branch)
     except Exception as e:
         logging.warning(f"Latest-build check failed for {btid}@{branch}: {e}; keeping as failing")
-        return key, windowed_failure
+        return key, windowed_failure, None
     if newest is None or newest.get("status") != "FAILURE":
-        return key, None  # recovered (latest build is green) or gone -> not currently failing
-    return key, newest  # newest IS the current red build
+        return key, None, None  # recovered (latest build is green) or gone -> not currently failing
+    # Attribute the failure to the specific meta-runner step(s) that failed.
+    attributed = None
+    try:
+        hits = attribute_failed_meta_runners(get_failed_step_ids(newest.get("id")), step_types)
+        if hits:
+            attributed = ",".join(hits)
+    except Exception as e:
+        logging.warning(f"Failed-step attribution failed for {btid}@{branch}: {e}; using config-level meta-runners")
+    return key, newest, attributed  # newest IS the current red build
 
 
 def update_failed_build_metrics(meta_runner_ids):
@@ -331,16 +392,22 @@ def update_failed_build_metrics(meta_runner_ids):
     if latest:
         logging.info(f"Recovery check on {len(latest)} (config, branch) with {MAX_WORKERS} workers")
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-            futures = [pool.submit(_check_still_failing, key, b) for key, b in latest.items()]
+            futures = [
+                pool.submit(_check_still_failing, key, b, configs[key[0]]["step_types"])
+                for key, b in latest.items()
+            ]
             for fut in as_completed(futures):
-                key, build = fut.result()
+                key, build, attributed = fut.result()
                 if build is not None:
-                    current[key] = build
+                    current[key] = (build, attributed)
 
     FAILED_BUILD_GAUGE.clear()
     FAILED_BUILD_INFO.clear()
-    for (btid, branch), b in current.items():
+    for (btid, branch), (b, attributed) in current.items():
         c = configs[btid]
+        # Label with the meta-runner(s) that actually failed; fall back to the config's full
+        # monitored list when the failing step couldn't be attributed to a monitored meta-runner.
+        meta = attributed or c["meta_runner_ids"]
         # Stable identity -> continuous series while the config stays red.
         FAILED_BUILD_GAUGE.labels(
             build_type_id=btid,
@@ -348,7 +415,7 @@ def update_failed_build_metrics(meta_runner_ids):
             project_name=c["project_name"],
             branch=branch,
             build_url=c["web_url"],  # config page (stable), NOT the per-build url
-            meta_runner_ids=c["meta_runner_ids"],
+            meta_runner_ids=meta,
         ).set(1)
         # Volatile per-build detail, joined back on (build_type_id, branch) at query time.
         FAILED_BUILD_INFO.labels(
