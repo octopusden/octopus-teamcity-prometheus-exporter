@@ -343,9 +343,15 @@ def _check_still_failing(key, windowed_failure, step_types):
     # Attribute the failure to the specific meta-runner step(s) that failed.
     attributed = None
     try:
-        hits = attribute_failed_meta_runners(get_failed_step_ids(newest.get("id")), step_types)
+        failed_ids = get_failed_step_ids(newest.get("id"))
+        hits = attribute_failed_meta_runners(failed_ids, step_types)
         if hits:
             attributed = ",".join(hits)
+        else:
+            logging.debug(
+                f"No meta-runner attributed for {btid}@{branch} build {newest.get('id')}: "
+                f"failed_step_ids={sorted(failed_ids)} step_type_keys={sorted(step_types)}"
+            )
     except Exception as e:
         logging.warning(f"Failed-step attribution failed for {btid}@{branch}: {e}; using config-level meta-runners")
     return key, newest, attributed  # newest IS the current red build
