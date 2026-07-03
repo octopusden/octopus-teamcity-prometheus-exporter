@@ -348,7 +348,7 @@ def _check_still_failing(key, windowed_failure, step_types):
         if hits:
             attributed = ",".join(hits)
         else:
-            logging.debug(
+            logging.info(
                 f"No meta-runner attributed for {btid}@{branch} build {newest.get('id')}: "
                 f"failed_step_ids={sorted(failed_ids)} step_type_keys={sorted(step_types)}"
             )
