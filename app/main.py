@@ -113,8 +113,8 @@ JDK_BUILD_CONFIGS_GAUGE = Gauge(
 # NOT exposed — drill down to a specific failing build via TeamCity instead.
 FAILED_BUILD_GAUGE = Gauge(
     "teamcity_failed_build",
-    "Currently-failing (config, branch) in the last WINDOW_DAYS for configs using a "
-    "monitored meta-runner. Value=1 means currently failing.",
+    "Currently-failing (config, branch) whose latest build failed AT a monitored meta-runner "
+    "step, within the last WINDOW_DAYS. Value=1. meta_runner_ids = the meta-runner(s) that failed.",
     ["build_type_id", "build_type_name", "project_name", "branch", "build_url", "meta_runner_ids"]
 )
 
@@ -325,36 +325,37 @@ def attribute_failed_meta_runners(failed_step_ids, step_types):
 
 
 def _check_still_failing(key, windowed_failure, step_types):
-    """Recovery check for one (config, branch). Returns (key, build_or_None, meta_runners_or_None):
-    - build: the current build if latest is still FAILURE; the windowed failure on API error
-      (fail-safe: don't drop a real failure); None if recovered/gone.
-    - meta_runners: comma-joined meta-runner id(s) whose step actually failed in that build,
-      or None to fall back to the config-level list (failure not at a monitored meta-runner,
-      or the step-status lookup errored).
+    """Recovery check for one (config, branch). Returns (key, build_or_None, meta_runners):
+    - build: the current build if latest is still FAILURE; None if recovered/gone.
+    - meta_runners: comma-joined meta-runner id(s) whose step actually failed -> caller EMITS it;
+      ``None`` if the build failed OUTSIDE a monitored meta-runner (compile/tests/etc.) -> caller
+      EXCLUDES it (like monit-tc, which only counts failures at a monitored meta-runner);
+      the sentinel ``"<attribution-error>"`` if the lookup errored (kept & visible, not dropped).
     """
     btid, branch = key
     try:
         newest = latest_build_on_branch(btid, branch)
     except Exception as e:
         logging.warning(f"Latest-build check failed for {btid}@{branch}: {e}; keeping as failing")
-        return key, windowed_failure, None
+        return key, windowed_failure, "<attribution-error>"
     if newest is None or newest.get("status") != "FAILURE":
         return key, None, None  # recovered (latest build is green) or gone -> not currently failing
     # Attribute the failure to the specific meta-runner step(s) that failed.
-    attributed = None
     try:
         failed_ids = get_failed_step_ids(newest.get("id"))
         hits = attribute_failed_meta_runners(failed_ids, step_types)
-        if hits:
-            attributed = ",".join(hits)
-        else:
-            logging.info(
-                f"No meta-runner attributed for {btid}@{branch} build {newest.get('id')}: "
-                f"failed_step_ids={sorted(failed_ids)} step_type_keys={sorted(step_types)}"
-            )
     except Exception as e:
-        logging.warning(f"Failed-step attribution failed for {btid}@{branch}: {e}; using config-level meta-runners")
-    return key, newest, attributed  # newest IS the current red build
+        logging.warning(f"Failed-step attribution failed for {btid}@{branch}: {e}; keeping as <attribution-error>")
+        return key, newest, "<attribution-error>"
+    if hits:
+        return key, newest, ",".join(hits)  # failed AT a monitored meta-runner -> count it
+    # Currently red but the failing step is NOT a monitored meta-runner -> not a meta-runner
+    # failure, so it is excluded from the metric (monit-tc semantics).
+    logging.info(
+        f"Excluding non-meta-runner failure {btid}@{branch} build {newest.get('id')}: "
+        f"failed_step_ids={sorted(failed_ids)} step_type_keys={sorted(step_types)}"
+    )
+    return key, newest, None
 
 
 def update_failed_build_metrics(meta_runner_ids):
@@ -399,11 +400,11 @@ def update_failed_build_metrics(meta_runner_ids):
                     current[key] = (build, attributed)
 
     FAILED_BUILD_GAUGE.clear()
+    exposed = 0
     for (btid, branch), (_build, attributed) in current.items():
+        if attributed is None:
+            continue  # failed outside a monitored meta-runner -> not a meta-runner failure, skip
         c = configs[btid]
-        # Label with the meta-runner(s) that actually failed; fall back to the config's full
-        # monitored list when the failing step couldn't be attributed to a monitored meta-runner.
-        meta = attributed or c["meta_runner_ids"]
         # Stable identity -> continuous series while the config stays red.
         FAILED_BUILD_GAUGE.labels(
             build_type_id=btid,
@@ -411,11 +412,12 @@ def update_failed_build_metrics(meta_runner_ids):
             project_name=c["project_name"],
             branch=branch,
             build_url=c["web_url"],  # build config (buildType) page URL, stable
-            meta_runner_ids=meta,
+            meta_runner_ids=attributed,  # the meta-runner(s) that actually failed
         ).set(1)
+        exposed += 1
     logging.info(
-        f"Currently-failing (config+branch, latest build still red) exposed: {len(current)} "
-        f"(of {len(latest)} that failed within the {WINDOW_DAYS}d window)"
+        f"Meta-runner failures exposed: {exposed} (of {len(current)} currently-red, "
+        f"{len(latest)} failed within the {WINDOW_DAYS}d window)"
     )
 
 
