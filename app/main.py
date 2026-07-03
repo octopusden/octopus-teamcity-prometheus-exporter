@@ -66,6 +66,14 @@ PAGE_SIZE = int(os.environ.get("PAGE_SIZE", "100"))
 FAILED_BUILDS_SCRAPE_INTERVAL = int(os.environ.get("FAILED_BUILDS_SCRAPE_INTERVAL", "86400"))  # 24 hours
 # Parallelism for the per-(config, branch) recovery check.
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "8"))
+# Also count failures at NON-meta-runner build steps whose NAME matches one of these patterns
+# (substring, case-insensitive) -- e.g. our Maven plugin steps. Matches monit-tc BUILD_STEP_PATTERNS.
+BUILD_STEP_PATTERNS = [p.strip() for p in os.environ.get("BUILD_STEP_PATTERNS", "Build & Publish,Publish").split(",") if p.strip()]
+
+# The monitored meta-runner id set for the current cycle; set by update_failed_build_metrics and
+# read by attribute_failed_meta_runners for the embedded-id match (so a meta-runner failure is
+# caught even if its parent step was removed/retyped since the build ran).
+_MONITORED_META_RUNNERS = set()
 
 # Recipe (meta-runner) id as it appears on the project recipe admin page: editRecipeId=<id>.
 _RECIPE_ID_RE = re.compile(r"editRecipeId=([A-Za-z0-9_.\-]+)")
@@ -113,8 +121,9 @@ JDK_BUILD_CONFIGS_GAUGE = Gauge(
 # NOT exposed — drill down to a specific failing build via TeamCity instead.
 FAILED_BUILD_GAUGE = Gauge(
     "teamcity_failed_build",
-    "Currently-failing (config, branch) whose latest build failed AT a monitored meta-runner "
-    "step, within the last WINDOW_DAYS. Value=1. meta_runner_ids = the meta-runner(s) that failed.",
+    "Currently-failing (config, branch) whose latest build failed at a monitored meta-runner "
+    "step OR a monitored build step, within the last WINDOW_DAYS. Value=1. meta_runner_ids = the "
+    "meta-runner(s) that failed, or the build-step name for a non-meta-runner build-step failure.",
     ["build_type_id", "build_type_name", "project_name", "branch", "build_url", "meta_runner_ids"]
 )
 
@@ -223,6 +232,8 @@ def enumerate_candidate_configs(meta_runner_ids):
             for s in steps
             if s.get("type") in meta_set and s.get("disabled") is not True and s.get("id")
         }
+        # step_id -> name for ALL steps, to match non-meta-runner build-step failures by name.
+        step_names = {s.get("id"): s.get("name", "") for s in steps if s.get("id")}
         monitored = sorted(set(step_types.values()))
         if monitored:
             configs[bt.get("id")] = {
@@ -231,6 +242,7 @@ def enumerate_candidate_configs(meta_runner_ids):
                 "web_url": bt.get("webUrl", ""),
                 "meta_runner_ids": ",".join(monitored),
                 "step_types": step_types,
+                "step_names": step_names,
             }
     return configs
 
@@ -306,31 +318,63 @@ def attribute_failed_meta_runners(failed_step_ids, step_types):
     """Map failed step ids to the monitored meta-runner ids that actually failed.
 
     ``step_types`` is the config's {step_id: meta_runner_id} for monitored steps. A failed
-    status id matches a step either exactly, or as an inner sub-step ``<stepId>_<...>``.
+    status id is matched three ways (in order): exact top-level step id; embedded meta-runner id
+    ``..._<metaRunnerId>_<index>`` (catches a meta-runner failure even if its parent step was
+    removed/retyped since the build ran); or inner sub-step ``<stepId>_...`` of a known step.
     Returns a sorted list (possibly empty when no monitored meta-runner step failed).
     """
     if not failed_step_ids or not step_types:
         return []
     ids_by_len = sorted(step_types, key=len, reverse=True)  # longest first, avoid prefix clashes
+    # Embedded-id regex built from the global monitored set (falls back to this config's set).
+    metas = _MONITORED_META_RUNNERS or set(step_types.values())
+    embedded_re = None
+    if metas:
+        alt = "|".join(re.escape(m) for m in sorted(metas, key=len, reverse=True))
+        embedded_re = re.compile(r"_(" + alt + r")_\d+$")
     hits = set()
     for raw in failed_step_ids:
-        if raw in step_types:
+        if raw in step_types:  # (1) exact top-level step id
             hits.add(step_types[raw])
-        else:
-            for sid in ids_by_len:
-                if raw.startswith(sid + "_"):
-                    hits.add(step_types[sid])
-                    break
+            continue
+        m = embedded_re.search(raw) if embedded_re else None
+        if m:  # (2) embedded meta-runner id in an inner status id
+            hits.add(m.group(1))
+            continue
+        for sid in ids_by_len:  # (3) inner sub-step of a known top-level step
+            if raw.startswith(sid + "_"):
+                hits.add(step_types[sid])
+                break
     return sorted(hits)
 
 
-def _check_still_failing(key, windowed_failure, step_types):
-    """Recovery check for one (config, branch). Returns (key, build_or_None, meta_runners):
+def match_build_step_failure(failed_step_ids, step_names):
+    """Return the name of a failed step whose name matches a BUILD_STEP_PATTERNS entry
+    (substring, case-insensitive), else None. Resolves inner sub-step ids to their top-level
+    step for the name lookup. Used to count non-meta-runner build-step failures (monit-tc).
+    """
+    if not failed_step_ids or not step_names or not BUILD_STEP_PATTERNS:
+        return None
+    ids_by_len = sorted(step_names, key=len, reverse=True)
+    pats = [p.lower() for p in BUILD_STEP_PATTERNS]
+    for raw in failed_step_ids:
+        name = step_names.get(raw)
+        if name is None:
+            for sid in ids_by_len:
+                if raw.startswith(sid + "_"):
+                    name = step_names[sid]
+                    break
+        if name and any(p in name.lower() for p in pats):
+            return name
+    return None
+
+
+def _check_still_failing(key, windowed_failure, config):
+    """Recovery check for one (config, branch). Returns (key, build_or_None, label):
     - build: the current build if latest is still FAILURE; None if recovered/gone.
-    - meta_runners: comma-joined meta-runner id(s) whose step actually failed -> caller EMITS it;
-      ``None`` if the build failed OUTSIDE a monitored meta-runner (compile/tests/etc.) -> caller
-      EXCLUDES it (like monit-tc, which only counts failures at a monitored meta-runner);
-      the sentinel ``"<attribution-error>"`` if the lookup errored (kept & visible, not dropped).
+    - label: meta-runner id(s) whose step failed, OR a matched build-step name -> caller EMITS it;
+      ``None`` if the build failed OUTSIDE both (compile/tests/etc.) -> caller EXCLUDES it
+      (monit-tc semantics); the sentinel ``"<attribution-error>"`` if the lookup errored.
     """
     btid, branch = key
     try:
@@ -343,17 +387,21 @@ def _check_still_failing(key, windowed_failure, step_types):
     # Attribute the failure to the specific meta-runner step(s) that failed.
     try:
         failed_ids = get_failed_step_ids(newest.get("id"))
-        hits = attribute_failed_meta_runners(failed_ids, step_types)
+        hits = attribute_failed_meta_runners(failed_ids, config["step_types"])
     except Exception as e:
         logging.warning(f"Failed-step attribution failed for {btid}@{branch}: {e}; keeping as <attribution-error>")
         return key, newest, "<attribution-error>"
     if hits:
         return key, newest, ",".join(hits)  # failed AT a monitored meta-runner -> count it
-    # Currently red but the failing step is NOT a monitored meta-runner -> not a meta-runner
-    # failure, so it is excluded from the metric (monit-tc semantics).
+    # Not a meta-runner hit -> maybe a monitored build-step failure (matched by step name).
+    step_name = match_build_step_failure(failed_ids, config.get("step_names", {}))
+    if step_name:
+        return key, newest, step_name  # failed at a monitored build step -> count it (monit-tc)
+    # Currently red but the failing step is neither a monitored meta-runner nor a monitored
+    # build step -> excluded from the metric (monit-tc semantics).
     logging.info(
         f"Excluding non-meta-runner failure {btid}@{branch} build {newest.get('id')}: "
-        f"failed_step_ids={sorted(failed_ids)} step_type_keys={sorted(step_types)}"
+        f"failed_step_ids={sorted(failed_ids)} step_type_keys={sorted(config['step_types'])}"
     )
     return key, newest, None
 
@@ -363,6 +411,8 @@ def update_failed_build_metrics(meta_runner_ids):
     CURRENTLY failing -- i.e. failed within the window AND whose latest build on that branch
     is still FAILURE (not yet recovered).
     """
+    global _MONITORED_META_RUNNERS
+    _MONITORED_META_RUNNERS = set(meta_runner_ids)  # used by attribute_failed_meta_runners
     configs = enumerate_candidate_configs(meta_runner_ids)
     logging.info(f"Candidate configs (use a monitored meta-runner): {len(configs)}")
 
@@ -391,7 +441,7 @@ def update_failed_build_metrics(meta_runner_ids):
         logging.info(f"Recovery check on {len(latest)} (config, branch) with {MAX_WORKERS} workers")
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
             futures = [
-                pool.submit(_check_still_failing, key, b, configs[key[0]]["step_types"])
+                pool.submit(_check_still_failing, key, b, configs[key[0]])
                 for key, b in latest.items()
             ]
             for fut in as_completed(futures):
