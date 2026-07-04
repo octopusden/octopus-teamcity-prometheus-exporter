@@ -210,11 +210,19 @@ def resolve_meta_runner_ids():
 
 
 def enumerate_candidate_configs(meta_runner_ids):
-    """All configs in the PARENT_PROJECT_ID subtree that have an ENABLED step whose runType
-    (step.type) is one of the monitored meta-runner ids. Keyed by build config id.
+    """All configs in the PARENT_PROJECT_ID subtree (excluding archived projects and
+    EXCLUDE_PROJECT_IDS) that have an ENABLED step whose runType (step.type) is one of the
+    monitored meta-runner ids. Keyed by build config id.
     """
     meta_set = set(meta_runner_ids)
     excluded = set(EXCLUDE_PROJECT_IDS)
+    # Skip configs under archived projects (consistent with the other metrics). Fall back to no
+    # archived-filtering on error rather than failing the whole cycle.
+    try:
+        archived = set(get_archived_projects())
+    except Exception as e:
+        logging.warning(f"Could not fetch archived projects: {e}; not filtering archived this cycle")
+        archived = set()
     params = {
         "locator": f"affectedProject:(id:{PARENT_PROJECT_ID})",
         "fields": "buildType(id,name,projectName,webUrl,projectId,steps(step(id,name,type,disabled))),nextHref",
@@ -222,7 +230,8 @@ def enumerate_candidate_configs(meta_runner_ids):
     }
     configs = {}
     for bt in _tc_paged("/app/rest/buildTypes", "buildType", params):
-        if bt.get("projectId") in excluded:
+        pid = bt.get("projectId")
+        if pid in excluded or pid in archived:
             continue
         steps = (bt.get("steps") or {}).get("step", []) or []
         # step_id -> meta_runner_id, for enabled steps that ARE a monitored meta-runner.
