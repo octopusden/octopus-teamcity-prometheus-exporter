@@ -75,8 +75,14 @@ BUILD_STEP_PATTERNS = [p.strip() for p in os.environ.get("BUILD_STEP_PATTERNS", 
 # caught even if its parent step was removed/retyped since the build ran).
 _MONITORED_META_RUNNERS = set()
 
-# Recipe (meta-runner) id as it appears on the project recipe admin page: editRecipeId=<id>.
+# Recipe (meta-runner) id as it appears on the OLD project recipe admin JSP: editRecipeId=<id>.
 _RECIPE_ID_RE = re.compile(r"editRecipeId=([A-Za-z0-9_.\-]+)")
+# TeamCity 2025.03 renamed "meta-runners" to "recipes" and rebuilt the admin page; the new
+# (client-rendered) UI no longer emits editRecipeId= links in the raw HTML. As a fallback we also
+# scan for id-like tokens the new page/endpoints expose as JSON.
+_RECIPE_JSON_ID_RE = re.compile(r'"(?:id|internalId|recipeId|metaRunnerId)"\s*:\s*"([A-Za-z0-9_.\-]+)"')
+# Candidate admin-page tab names, tried in order (renamed across versions).
+_RECIPE_TAB_NAMES = ["recipe", "recipes", "metaRunner", "metaRunners"]
 
 HEADERS = {
     "Authorization": f"Bearer {TOKEN}",
@@ -184,14 +190,44 @@ def _tc_paged(path, item_key, params=None):
 def get_recipe_ids(project_id):
     """Discover meta-runner (recipe) ids from a project's recipe admin page.
 
-    There is no REST endpoint for recipes, so we scrape /admin/editProject.html and extract
-    ``editRecipeId=<id>``. Needs project-settings view access; in prod the service account
-    usually lacks it, so this fails gracefully and we fall back to META_RUNNER_IDS.
+    There is no public REST endpoint for recipes/meta-runners, so we scrape the project
+    settings page and extract the recipe ids. TeamCity 2025.03 renamed "meta-runners" to
+    "recipes" and rebuilt the admin UI, so we try several tab names and parse BOTH the old
+    ``editRecipeId=<id>`` links and any id-like JSON tokens the new (client-rendered) page
+    exposes. Needs project-settings view access; in prod the service account usually lacks it,
+    so this fails gracefully and we fall back to META_RUNNER_IDS.
+
+    Returns a sorted list of discovered ids (possibly empty).
     """
-    url = f"{TEAMCITY_URL.rstrip('/')}/admin/editProject.html?projectId={project_id}&tab=recipe"
-    r = requests.get(url, headers={**HEADERS, "Accept": "text/html"}, timeout=REQUEST_TIMEOUT)
-    r.raise_for_status()
-    return sorted(set(_RECIPE_ID_RE.findall(r.text)))
+    base = TEAMCITY_URL.rstrip("/")
+    last_body = ""
+    last_url = ""
+    for tab in _RECIPE_TAB_NAMES:
+        url = f"{base}/admin/editProject.html?projectId={project_id}&tab={tab}"
+        try:
+            r = requests.get(url, headers={**HEADERS, "Accept": "text/html"}, timeout=REQUEST_TIMEOUT)
+            r.raise_for_status()
+        except requests.HTTPError as e:
+            # A renamed/removed tab 404s -- try the next candidate rather than aborting.
+            logging.debug(f"Recipe tab '{tab}' not available ({e}); trying next")
+            continue
+        body = r.text or ""
+        last_body, last_url = body, url
+        ids = set(_RECIPE_ID_RE.findall(body)) | set(_RECIPE_JSON_ID_RE.findall(body))
+        if ids:
+            logging.info(f"Discovered {len(ids)} recipe id(s) from {url} (tab='{tab}')")
+            return sorted(ids)
+
+    # Nothing matched on any tab. Don't fail silently: log where we looked and a short sample of
+    # the last response so the real 2026.1 page structure can be identified (see diagnose_recipes.py).
+    sample = re.sub(r"\s+", " ", last_body).strip()[:500]
+    logging.warning(
+        "Recipe discovery found no ids on any known admin tab "
+        f"({', '.join(_RECIPE_TAB_NAMES)}). Last URL={last_url or 'n/a'}. "
+        "The Recipes page likely changed (TeamCity 2025.03+). Falling back to META_RUNNER_IDS. "
+        f"Last response sample: {sample!r}"
+    )
+    return []
 
 
 def resolve_meta_runner_ids():
