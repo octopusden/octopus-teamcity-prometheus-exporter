@@ -17,8 +17,19 @@ Optional:
 | Variable        | Description                                                      |
 |-----------------|------------------------------------------------------------------|
 | `LOG_LEVEL`     | Set needed level for logging (number or name), default INFO (20) |
+| `LOG_FORMAT`    | Logging output format: `json` (default) or `text`                |
 | `METRICS_PORT`     | Set needed port for scrape metrics. default 8000                 |
 | `SCRAPE_INTERVAL`     | Set needed interval scrape. default 6000                         |
+
+## Logging
+
+Logging is configured through [octopus-oc-corelibs-logging](https://github.com/octopusden/octopus-oc-corelibs-logging)
+(`oc-logging`, structlog-based). Every record carries the level, the message, a UTC timestamp
+and the calling function name:
+
+```json
+{"level": "info", "message": "Start teamcity exporter", "timestamp": "2025-10-09 15:05:43", "func_name": "<module>"}
+```
 
 ## Metric Format
 
