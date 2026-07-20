@@ -31,6 +31,15 @@ and the calling function name:
 {"level": "info", "message": "Start teamcity exporter", "timestamp": "2025-10-09 15:05:43", "func_name": "<module>"}
 ```
 
+Records coming from third-party libraries (`urllib3`, `requests`) are rendered in the same
+one-line format and carry an extra `logger` field with the library logger name. This matters for
+log collectors: a bare, multi-line library message gets merged into the preceding record and
+breaks JSON parsing on ingest.
+
+```json
+{"level": "debug", "message": "Starting new HTTPS connection (1): teamcity.example.com:443", "timestamp": "2025-10-09 15:05:43", "func_name": "_new_conn", "logger": "urllib3.connectionpool"}
+```
+
 ## Metric Format
 
 The exporter outputs Prometheus metrics in the following format:

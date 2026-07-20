@@ -33,8 +33,52 @@ def get_log_level():
         name = lvl.upper()
 
     if name not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
-        return "info"
+        return "INFO"
     return name.lower()
+
+
+# The stdlib logger name our structlog records are emitted under. Passing it explicitly to
+# structlog.get_logger() pins it, instead of letting the factory derive it from the call site --
+# ForeignLogFormatter relies on it to tell our (already rendered) records from foreign ones.
+APP_LOGGER_NAME = "teamcity-exporter"
+
+
+class ForeignLogFormatter(logging.Formatter):
+    """Render records from third-party stdlib loggers in the same shape as our own.
+
+    oc-logging sets the root format to "%(message)s" (structlog renders our records
+    itself), so anything logged through plain stdlib logging -- urllib3, requests --
+    is printed bare, with no level and no timestamp. Log collectors then merge those
+    lines into the preceding structlog event, which stops being valid JSON and lands
+    in Kibana unparsed. Wrapping them keeps every line a self-contained record.
+
+    Records emitted by this module already went through structlog and are passed
+    through untouched.
+    """
+
+    def __init__(self, json_output):
+        super().__init__()
+        self.json_output = json_output
+
+    def format(self, record):
+        if record.name == APP_LOGGER_NAME:
+            return record.getMessage()
+
+        message = record.getMessage()
+        if record.exc_info:
+            message = f"{message}\n{self.formatException(record.exc_info)}"
+        timestamp = datetime.fromtimestamp(record.created, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+        if self.json_output:
+            # json.dumps escapes newlines, so a traceback stays on a single line.
+            return json.dumps({
+                "level": record.levelname.lower(),
+                "message": message,
+                "timestamp": timestamp,
+                "func_name": record.funcName,
+                "logger": record.name,
+            })
+        return f"[{timestamp}] [{record.levelname}] {message} func_name={record.funcName} logger={record.name}"
 
 
 def setup_logging():
@@ -43,6 +87,7 @@ def setup_logging():
 
     LOG_FORMAT selects the renderer: "json" (default) or "text". The calling
     function name is added to every record, matching the previous %(funcName)s field.
+    Third-party stdlib loggers are rendered in the same format, see ForeignLogFormatter.
     """
     log_format = os.environ.get("LOG_FORMAT", "json").lower()
     if log_format not in ("json", "text"):
@@ -57,7 +102,12 @@ def setup_logging():
             )
         ],
     )
-    return structlog.get_logger()
+
+    formatter = ForeignLogFormatter(log_format == "json")
+    for handler in logging.getLogger().handlers:
+        handler.setFormatter(formatter)
+
+    return structlog.get_logger(APP_LOGGER_NAME)
 
 
 log = setup_logging()
