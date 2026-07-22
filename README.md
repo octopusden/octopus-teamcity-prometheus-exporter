@@ -17,8 +17,28 @@ Optional:
 | Variable        | Description                                                      |
 |-----------------|------------------------------------------------------------------|
 | `LOG_LEVEL`     | Set needed level for logging (number or name), default INFO (20) |
+| `LOG_FORMAT`    | Logging output format: `json` (default) or `text`                |
 | `METRICS_PORT`     | Set needed port for scrape metrics. default 8000                 |
 | `SCRAPE_INTERVAL`     | Set needed interval scrape. default 6000                         |
+
+## Logging
+
+Logging is configured through [octopus-oc-corelibs-logging](https://github.com/octopusden/octopus-oc-corelibs-logging)
+(`oc-logging`, structlog-based). Every record carries the level, the message, a UTC timestamp
+and the calling function name:
+
+```json
+{"level": "info", "message": "Start teamcity exporter", "timestamp": "2025-10-09 15:05:43", "func_name": "<module>"}
+```
+
+Records coming from third-party libraries (`urllib3`, `requests`) are rendered in the same
+one-line format and carry an extra `logger` field with the library logger name. This matters for
+log collectors: a bare, multi-line library message gets merged into the preceding record and
+breaks JSON parsing on ingest.
+
+```json
+{"level": "debug", "message": "Starting new HTTPS connection (1): teamcity.example.com:443", "timestamp": "2025-10-09 15:05:43", "func_name": "_new_conn", "logger": "urllib3.connectionpool"}
+```
 
 ## Metric Format
 
