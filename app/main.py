@@ -154,8 +154,10 @@ BUILD_STEP_PATTERNS = [p.strip() for p in os.environ.get("BUILD_STEP_PATTERNS", 
 # caught even if its parent step was removed/retyped since the build ran).
 _MONITORED_META_RUNNERS = set()
 
-# Recipe (meta-runner) id as it appears on the project recipe admin page: editRecipeId=<id>.
-_RECIPE_ID_RE = re.compile(r"editRecipeId=([A-Za-z0-9_.\-]+)")
+# TeamCity 2025.03+ ("recipes", formerly "meta-runners") exposes a project's recipe list via this
+# internal JSON endpoint: /app/recipes/overview/all?projectId=<id> -> {"recipes":[{"id":...}, ...]}.
+# The `id` equals the build-step `type` a config runs, so it's exactly what we match failures on.
+_RECIPES_OVERVIEW_PATH = "/app/recipes/overview/all"
 
 HEADERS = {
     "Authorization": f"Bearer {TOKEN}",
@@ -261,16 +263,23 @@ def _tc_paged(path, item_key, params=None):
 
 
 def get_recipe_ids(project_id):
-    """Discover meta-runner (recipe) ids from a project's recipe admin page.
+    """Discover recipe (meta-runner) ids defined in ``project_id``.
 
-    There is no REST endpoint for recipes, so we scrape /admin/editProject.html and extract
-    ``editRecipeId=<id>``. Needs project-settings view access; in prod the service account
-    usually lacks it, so this fails gracefully and we fall back to META_RUNNER_IDS.
+    Calls the recipes overview endpoint ``/app/recipes/overview/all?projectId=<id>``, which returns
+    ``{"recipes": [{"id": ..., ...}]}``. Each ``id`` is exactly the build-step ``type`` a config runs
+    when it uses that recipe, so it is the value we match failed steps against. Authenticates with the
+    same bearer token as every other call -- no admin/UI-session access needed.
+
+    This replaces the previous admin-HTML scrape, which returned nothing once the Recipes admin page
+    became client-rendered (Sakura UI, TeamCity 2025.03+). On older servers without this endpoint the
+    call 404s; the caller (resolve_meta_runner_ids) catches that and falls back to META_RUNNER_IDS.
+
+    Returns a sorted list of discovered ids (possibly empty).
     """
-    url = f"{TEAMCITY_URL.rstrip('/')}/admin/editProject.html?projectId={project_id}&tab=recipe"
-    r = requests.get(url, headers={**HEADERS, "Accept": "text/html"}, timeout=REQUEST_TIMEOUT)
-    r.raise_for_status()
-    return sorted(set(_RECIPE_ID_RE.findall(r.text)))
+    data = _tc_get_json(_RECIPES_OVERVIEW_PATH, params={"projectId": project_id})
+    ids = sorted({r.get("id") for r in (data.get("recipes") or []) if r.get("id")})
+    logging.info(f"Discovered {len(ids)} recipe id(s) for project {project_id} via recipes overview")
+    return ids
 
 
 def resolve_meta_runner_ids():
