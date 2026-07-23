@@ -143,6 +143,13 @@ EXCLUDE_PROJECT_IDS = [p.strip() for p in os.environ.get("EXCLUDE_PROJECT_IDS", 
 WINDOW_DAYS = int(os.environ.get("WINDOW_DAYS", "7"))
 PAGE_SIZE = int(os.environ.get("PAGE_SIZE", "100"))
 FAILED_BUILDS_SCRAPE_INTERVAL = int(os.environ.get("FAILED_BUILDS_SCRAPE_INTERVAL", "86400"))  # 24 hours
+BUILDS_CHUNK_HOURS = max(1, int(os.environ.get("BUILDS_CHUNK_HOURS", "24")))
+# Per-chunk page size: TeamCity 2026.1 sizes a single (un-paged) builds+finishDate result by
+# the requested count, so this must exceed the failures any one chunk can contain.
+FAILED_BUILDS_CHUNK_COUNT = int(os.environ.get("FAILED_BUILDS_CHUNK_COUNT", "100000"))
+# If a chunk returns at least this many builds it may be brushing the server's result ceiling
+# and silently dropping the oldest builds in the chunk -- warn so BUILDS_CHUNK_HOURS is lowered.
+CHUNK_TRUNCATION_WARN = 1000
 # Parallelism for the per-(config, branch) recovery check.
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "8"))
 # Also count failures at NON-meta-runner build steps whose NAME matches one of these patterns
@@ -347,20 +354,55 @@ def enumerate_candidate_configs(meta_runner_ids):
 def iter_failed_builds(since):
     """Failed builds (all branches) in the subtree that finished after ``since`` (a tz-aware
     datetime).
+
+    The window ``[since, now]`` is walked in bounded ``finishDate`` chunks of
+    ``BUILDS_CHUNK_HOURS`` rather than one open-ended ``finishDate:after`` query. On TeamCity
+    2026.1 an open-ended query is silently truncated to only the most recent builds
+    (``nextHref`` stops early and a depth ceiling caps the result), so a multi-day window
+    returned only the last few hours -- a config that stayed red but whose latest failure was
+    older than the truncation point silently dropped out of the metric. A bounded
+    ``finishDate:(after..before)`` range with a high ``count`` returns its full contents, so
+    each chunk is complete; chunks are unioned (deduped by build id -- adjacent chunks overlap
+    by 1s so a build finishing exactly on a boundary can't slip between them). Mirrors
+    monit-tc's iter_failed_builds.
     """
-    date_str = since.strftime("%Y%m%dT%H%M%S%z")
-    locator = (
-        f"affectedProject:(id:{PARENT_PROJECT_ID}),"
-        "status:FAILURE,"
-        "branch:(default:any),"
-        f"finishDate:(date:{date_str},condition:after)"
-    )
-    params = {
-        "locator": locator,
-        "fields": "build(id,number,buildTypeId,branchName,webUrl,finishDate),nextHref",
-        "count": str(PAGE_SIZE),
-    }
-    return _tc_paged("/app/rest/builds", "build", params)
+    now = datetime.now(timezone.utc)
+    fields = "build(id,number,buildTypeId,branchName,webUrl,finishDate),nextHref"
+    step = timedelta(hours=BUILDS_CHUNK_HOURS)
+    seen = set()
+    lo = since
+    while lo < now:
+        hi = min(lo + step, now)
+        # Strict after/before with a 1s overlap on each side; dedup covers the overlap.
+        after = (lo - timedelta(seconds=1)).strftime("%Y%m%dT%H%M%S%z")
+        before = (hi + timedelta(seconds=1)).strftime("%Y%m%dT%H%M%S%z")
+        locator = (
+            f"affectedProject:(id:{PARENT_PROJECT_ID}),"
+            "status:FAILURE,"
+            "branch:(default:any),"
+            f"finishDate:(date:{after},condition:after),"
+            f"finishDate:(date:{before},condition:before)"
+        )
+        params = {
+            "locator": locator,
+            "fields": fields,
+            "count": str(FAILED_BUILDS_CHUNK_COUNT),
+        }
+        chunk_count = 0
+        for item in _tc_paged("/app/rest/builds", "build", params):
+            chunk_count += 1
+            bid = item.get("id")
+            if bid in seen:
+                continue
+            seen.add(bid)
+            yield item
+        if chunk_count >= CHUNK_TRUNCATION_WARN:
+            log.warning(
+                f"Failed-builds chunk {after}..{before} returned {chunk_count} builds, "
+                f"approaching the server result ceiling -- it may be truncated; lower "
+                f"BUILDS_CHUNK_HOURS (currently {BUILDS_CHUNK_HOURS})."
+            )
+        lo = hi
 
 
 def _branch_locator(branch_name):
