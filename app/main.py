@@ -143,7 +143,7 @@ EXCLUDE_PROJECT_IDS = [p.strip() for p in os.environ.get("EXCLUDE_PROJECT_IDS", 
 WINDOW_DAYS = int(os.environ.get("WINDOW_DAYS", "7"))
 PAGE_SIZE = int(os.environ.get("PAGE_SIZE", "100"))
 FAILED_BUILDS_SCRAPE_INTERVAL = int(os.environ.get("FAILED_BUILDS_SCRAPE_INTERVAL", "86400"))  # 24 hours
-BUILDS_CHUNK_HOURS = int(os.environ.get("BUILDS_CHUNK_HOURS", "24"))
+BUILDS_CHUNK_HOURS = max(1, int(os.environ.get("BUILDS_CHUNK_HOURS", "24")))
 # Per-chunk page size: TeamCity 2026.1 sizes a single (un-paged) builds+finishDate result by
 # the requested count, so this must exceed the failures any one chunk can contain.
 FAILED_BUILDS_CHUNK_COUNT = int(os.environ.get("FAILED_BUILDS_CHUNK_COUNT", "100000"))
