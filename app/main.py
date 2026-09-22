@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import re
 import base64
+from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
@@ -415,6 +416,14 @@ def _branch_locator(branch_name):
     return f"branch:(name:($base64:{b64}))"
 
 
+def build_config_branch_url(web_url, branch_name, is_default_branch):
+    if not web_url:
+        return ""
+    internal = "<default>" if (is_default_branch or not branch_name or branch_name == "<default>") else branch_name
+    sep = "&" if "?" in web_url else "?"
+    return f"{web_url}{sep}branch={quote(internal, safe='')}"
+
+
 def latest_build_on_branch(config_id, branch_name):
     """The most recent build on a given branch (ANY status), or None.
 
@@ -423,7 +432,7 @@ def latest_build_on_branch(config_id, branch_name):
     """
     data = _tc_get_json("/app/rest/builds", params={
         "locator": f"buildType:(id:{config_id}),{_branch_locator(branch_name)},count:1",
-        "fields": "build(id,number,status,buildTypeId,branchName,webUrl,finishDate)"
+        "fields": "build(id,number,status,buildTypeId,branchName,defaultBranch,webUrl,finishDate)"
     })
     builds = data.get("build") or []
     return builds[0] if builds else None
@@ -590,17 +599,20 @@ def update_failed_build_metrics(meta_runner_ids):
 
     FAILED_BUILD_GAUGE.clear()
     exposed = 0
-    for (btid, branch), (_build, attributed) in current.items():
+    for (btid, branch), (build, attributed) in current.items():
         if attributed is None:
             continue  # failed outside a monitored meta-runner -> not a meta-runner failure, skip
         c = configs[btid]
+        build_url = build_config_branch_url(
+            c["web_url"], branch, build.get("defaultBranch") is True
+        )
         # Stable identity -> continuous series while the config stays red.
         FAILED_BUILD_GAUGE.labels(
             build_type_id=btid,
             build_type_name=c["name"],
             project_name=c["project_name"],
             branch=branch,
-            build_url=c["web_url"],  # build config (buildType) page URL, stable
+            build_url=build_url,
             meta_runner_ids=attributed,  # the meta-runner(s) that actually failed
         ).set(1)
         exposed += 1
