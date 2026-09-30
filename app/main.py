@@ -2,7 +2,7 @@ import os
 import time
 import requests
 import threading
-from prometheus_client import start_http_server, Gauge, Summary
+from prometheus_client import start_http_server, Counter, Gauge, Summary
 import logging
 import structlog
 from oc_logging import setup_json_logging, setup_text_logging
@@ -157,6 +157,19 @@ MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "8"))
 # (substring, case-insensitive) -- e.g. our Maven plugin steps. Matches monit-tc BUILD_STEP_PATTERNS.
 BUILD_STEP_PATTERNS = [p.strip() for p in os.environ.get("BUILD_STEP_PATTERNS", "Build & Publish,Publish").split(",") if p.strip()]
 
+# --- Known-answer probe ---
+# Every PROBE_INTERVAL seconds ask TeamCity a question whose answer is known to be non-empty: does
+# template PROBE_TEMPLATE_ID have at least one active build configuration? Only a correct answer
+# increments PROBE_SUCCESS_COUNTER, so a counter that stops moving means the data behind every other
+# metric can no longer be trusted -- whatever the cause (token, permissions, TeamCity, this process,
+# the scrape, Prometheus storage). The gauges above keep serving their last values when a cycle
+# fails, so neither `up` nor the series themselves can show that.
+PROBE_TEMPLATE_ID = os.environ.get("PROBE_TEMPLATE_ID", "CDRelease")
+PROBE_INTERVAL = int(os.environ.get("PROBE_INTERVAL", "900"))  # 15 minutes
+# Short on purpose: REQUEST_TIMEOUT is sized for deep pagination, and a probe held for minutes by one
+# hanging request would report late instead of failing.
+PROBE_TIMEOUT = int(os.environ.get("PROBE_TIMEOUT", "60"))
+
 # The monitored meta-runner id set for the current cycle; set by update_failed_build_metrics and
 # read by attribute_failed_meta_runners for the embedded-id match (so a meta-runner failure is
 # caught even if its parent step was removed/retyped since the build ran).
@@ -215,6 +228,13 @@ FAILED_BUILD_GAUGE = Gauge(
     "meta-runner(s) that failed, or the build-step name for a non-meta-runner build-step failure.",
     ["build_type_id", "build_type_name", "project_name", "branch", "build_url", "meta_runner_ids"]
 )
+
+PROBE_SUCCESS_COUNTER = Counter(
+    "teamcity_exporter_probe_success",
+    "Known-answer probes against TeamCity that returned the expected answer (template "
+    "PROBE_TEMPLATE_ID has at least one active build configuration). Alert when it stops increasing."
+)
+
 
 
 def _tc_get_json(path, params=None, timeout=None):
@@ -1015,6 +1035,37 @@ def fetch_and_update_status_metrics():
         time.sleep(STATUS_SCRAPE_INTERVAL)
 
 
+def run_probe():
+    """
+    Ask TeamCity for one active build configuration of PROBE_TEMPLATE_ID and increment
+    PROBE_SUCCESS_COUNTER only when it returns one.
+
+    An empty answer counts as a failure: this template always has configurations, so 200 with
+    nothing in it means the token can no longer see them, not that there are none.
+    """
+    data = _tc_get_json("/app/rest/buildTypes", params={
+        "locator": f"template:{PROBE_TEMPLATE_ID},paused:false,count:1"
+    }, timeout=PROBE_TIMEOUT)
+    found = data.get("count", 0)
+    if found >= 1:
+        PROBE_SUCCESS_COUNTER.inc()
+        log.info(f"Probe succeeded: template {PROBE_TEMPLATE_ID} has active build configurations")
+    else:
+        log.error(f"Probe failed: template {PROBE_TEMPLATE_ID} returned {found} active build configurations")
+
+
+def run_probe_loop():
+    """Run the known-answer probe every PROBE_INTERVAL seconds, starting immediately."""
+    log.info("Starting probe thread")
+    while True:
+        try:
+            run_probe()
+        except Exception as e:
+            log.error(f"Probe failed: {e}")
+
+        time.sleep(PROBE_INTERVAL)
+
+
 if __name__ == "__main__":
     if not all([TEAMCITY_URL, TOKEN, TEMPLATE_IDS, JDK_PROJECT_ID]):
         _error_txt = "TEAMCITY_URL, TEAMCITY_TOKEN, TEAMCITY_TEMPLATE_IDS and JDK_PROJECT_ID must be set as environment variables"
@@ -1033,6 +1084,11 @@ if __name__ == "__main__":
     # Start thread for fast status updates only
     status_metrics_thread = threading.Thread(target=fetch_and_update_status_metrics, daemon=True)
     status_metrics_thread.start()
+
+    # Start thread for the known-answer probe
+    log.info(f"Probe: template={PROBE_TEMPLATE_ID}, interval={PROBE_INTERVAL} seconds")
+    probe_thread = threading.Thread(target=run_probe_loop, daemon=True)
+    probe_thread.start()
 
     # Start thread for failed-builds-by-meta-runner (optional)
     if PARENT_PROJECT_ID and (META_RUNNER_IDS or RECIPES_PROJECT_ID):
