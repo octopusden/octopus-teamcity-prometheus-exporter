@@ -20,6 +20,9 @@ Optional:
 | `LOG_FORMAT`    | Logging output format: `json` (default) or `text`                |
 | `METRICS_PORT`     | Set needed port for scrape metrics. default 8000                 |
 | `SCRAPE_INTERVAL`     | Set needed interval scrape. default 6000                         |
+| `PROBE_TEMPLATE_ID`   | Template whose active build configurations the probe checks for. default `CDRelease` |
+| `PROBE_INTERVAL`      | Seconds between probes. default 900                              |
+| `PROBE_TIMEOUT`       | HTTP timeout in seconds for a probe request. default 60          |
 
 ## Logging
 
@@ -60,3 +63,25 @@ teamcity_last_build_status{
 | `1`      | Successful build|
 | `0`      | Failed build|
 | `-1`     | No results |
+
+## Probe
+
+The build metrics above are refreshed in background loops, and a loop that fails keeps serving the
+last values it had. An expired token, lost permissions or a full Prometheus disk therefore leave
+`up` at 1 and the series in place while the numbers stop being true.
+
+To make that visible, the exporter asks TeamCity a question with a known answer every
+`PROBE_INTERVAL` seconds, starting at startup: does template `PROBE_TEMPLATE_ID` have at least one
+active build configuration? The counter below increases only when the answer is yes. An error, a
+timeout, or an empty answer leave it unchanged and are logged.
+
+```text
+teamcity_exporter_probe_success_total << number of successful probes since the exporter started >>
+```
+
+Alert when it stops increasing, and when it is missing:
+
+```promql
+increase(teamcity_exporter_probe_success_total[45m]) == 0
+or absent_over_time(teamcity_exporter_probe_success_total[30m])
+```
