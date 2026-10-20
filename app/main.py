@@ -325,13 +325,19 @@ def resolve_meta_runner_ids():
     return combined
 
 
-def excluded_build_type_ids():
+def excluded_build_type_ids(strict=False):
     """Build config ids under the EXCLUDE_PROJECT_IDS subtrees (nested subprojects included).
 
     A config's direct projectId only matches the excluded project itself, so nested subprojects
-    would slip through; resolving the ids via affectedProject covers the whole subtree. A project
-    that fails to resolve is warned about and skipped rather than failing the cycle. Mirrors
+    would slip through; resolving the ids via affectedProject covers the whole subtree. Mirrors
     monit-tc's excluded_build_type_ids.
+
+    A project that fails to resolve is handled per mode:
+      strict=False (default): warned about and skipped. Fine for the failed-builds metric, whose
+        gauge is cleared and rebuilt every cycle, so a gap heals on the next one.
+      strict=True: raises RuntimeError naming the project. For the status/duration/project-duration
+        gauges, which are never cleared: exporting excluded configs after a transient failure would
+        leave those series stuck, so the caller skips the cycle and keeps the previous values.
     """
     excluded = set()
     for pid in EXCLUDE_PROJECT_IDS:
@@ -343,6 +349,10 @@ def excluded_build_type_ids():
         try:
             ids = {bt.get("id") for bt in _tc_paged("/app/rest/buildTypes", "buildType", params) if bt.get("id")}
         except Exception as e:
+            if strict:
+                raise RuntimeError(
+                    f"Skipping this cycle, could not resolve excluded project {pid}: {e}"
+                ) from e
             log.warning(f"Could not resolve excluded project {pid}: {e}")
             continue
         log.info(f"Excluding {len(ids)} config(s) under project {pid} (including subprojects)")
@@ -850,12 +860,17 @@ def get_start_date_by_last_build_id(build_id):
     return None
 
 
-def get_all_build_configs():
+def get_all_build_configs(excluded_ids=None):
     """
     Retrieve non-archived build configurations from TeamCity, optionally limited to the configured JDK project and its subprojects.
 
+    Parameters:
+        excluded_ids (set | None): Build config ids under the EXCLUDE_PROJECT_IDS subtrees, if the caller has
+            already resolved them; resolved here when None.
+
     Returns:
-        list: Build configuration objects as returned by the TeamCity API, filtered to exclude configurations whose projects are archived.
+        list: Build configuration objects as returned by the TeamCity API, filtered to exclude configurations whose projects are archived
+        and configurations under the EXCLUDE_PROJECT_IDS subtrees (subprojects included).
 
     Raises:
         requests.HTTPError: If the HTTP request to the TeamCity API fails.
@@ -863,6 +878,8 @@ def get_all_build_configs():
     log.debug("Reached get_all_build_configs")
 
     archived_projects = get_archived_projects()
+    if excluded_ids is None:
+        excluded_ids = excluded_build_type_ids()
 
     log.info(f"Filtering build configs for project: {JDK_PROJECT_ID}")
     params = {"fields": "buildType(id,projectId,name,templates(buildType(id)))"}
@@ -874,9 +891,9 @@ def get_all_build_configs():
     log.info(f"All build for project {JDK_PROJECT_ID} count is {len(all_configs)}")
     non_archived_configs = [
         cfg for cfg in all_configs
-        if cfg.get('projectId') not in archived_projects
+        if cfg.get('projectId') not in archived_projects and cfg.get('id') not in excluded_ids
     ]
-    log.info(f"All non archived build for project {JDK_PROJECT_ID} count is {len(non_archived_configs)}")
+    log.info(f"All non archived, non excluded build for project {JDK_PROJECT_ID} count is {len(non_archived_configs)}")
     return non_archived_configs
 
 
@@ -913,16 +930,17 @@ def get_jdk_version_for_build_config(build_type_id):
         return 'error'
 
 
-def update_jdk_metrics():
+def update_jdk_metrics(excluded_ids=None):
     """
     Update Prometheus gauges reflecting the total number of build configurations and their distribution by JDK version.
 
-    Collects all non-archived build configurations, sets TOTAL_BUILD_CONFIGS_GAUGE to the total count, and sets JDK_BUILD_CONFIGS_GAUGE for each observed JDK version with the number of configurations using that JDK. Errors encountered while retrieving data are logged and do not raise.
+    Collects all non-archived build configurations outside the EXCLUDE_PROJECT_IDS subtrees (excluded_ids is
+    passed through to get_all_build_configs, which resolves it when None), sets TOTAL_BUILD_CONFIGS_GAUGE to the total count, and sets JDK_BUILD_CONFIGS_GAUGE for each observed JDK version with the number of configurations using that JDK. Errors encountered while retrieving data are logged and do not raise.
     """
     log.info("Updating JDK metrics")
 
     try:
-        build_configs = get_all_build_configs()
+        build_configs = get_all_build_configs(excluded_ids)
         total_count = len(build_configs)
 
         TOTAL_BUILD_CONFIGS_GAUGE.set(total_count)
@@ -944,17 +962,20 @@ def update_build_status_metrics():
     """
     Update only BUILD_STATUS_GAUGE metrics for all build configurations from configured templates.
     This function runs more frequently to provide faster status updates.
+    Skips archived projects and configs under the EXCLUDE_PROJECT_IDS subtrees (subprojects included).
     """
     log.info("Updating build status metrics")
 
     try:
         archived_projects = get_archived_projects()
+        # Strict: these gauges are never cleared, so skip the cycle rather than export excluded configs.
+        excluded_ids = excluded_build_type_ids(strict=True)
 
         for template_id in TEMPLATE_IDS:
             build_configs = get_build_configs_from_template(template_id)
 
             for cfg in build_configs:
-                if cfg['projectId'] in archived_projects:
+                if cfg['projectId'] in archived_projects or cfg['id'] in excluded_ids:
                     continue
 
                 last_build = get_last_build_status(cfg["id"])
@@ -979,6 +1000,7 @@ def fetch_and_update_full_metrics():
     Continuously poll TeamCity and refresh ALL Prometheus gauges for builds, projects, and JDK distribution.
 
     On each interval it retrieves build configurations for the configured templates, skips archived projects,
+    skips configs under the EXCLUDE_PROJECT_IDS subtrees (subprojects included),
     records the latest build status and successful build durations, aggregates project durations for finished
     project chains, and updates JDK-related metrics; this function runs indefinitely and sleeps SCRAPE_INTERVAL
     between iterations.
@@ -991,14 +1013,17 @@ def fetch_and_update_full_metrics():
             # Inside try so a transient API error (e.g. 401/network) is caught and retried
             # next interval instead of killing this thread permanently.
             archived_projects = get_archived_projects()
+            # Resolved once per cycle and shared with the JDK metrics. Strict: these gauges are never
+            # cleared, so a resolution failure skips the whole cycle (JDK metrics included).
+            excluded_ids = excluded_build_type_ids(strict=True)
             # Update JDK metrics
-            update_jdk_metrics()
+            update_jdk_metrics(excluded_ids)
 
             for template_id in TEMPLATE_IDS:
                 build_configs = get_build_configs_from_template(template_id)
 
                 for cfg in build_configs:
-                    if cfg['projectId'] in archived_projects:
+                    if cfg['projectId'] in archived_projects or cfg['id'] in excluded_ids:
                         continue
                     last_build = get_last_build_status(cfg["id"])
                     status = last_build['status']
