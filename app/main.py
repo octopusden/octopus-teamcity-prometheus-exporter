@@ -325,13 +325,39 @@ def resolve_meta_runner_ids():
     return combined
 
 
+def excluded_build_type_ids():
+    """Build config ids under the EXCLUDE_PROJECT_IDS subtrees (nested subprojects included).
+
+    A config's direct projectId only matches the excluded project itself, so nested subprojects
+    would slip through; resolving the ids via affectedProject covers the whole subtree. A project
+    that fails to resolve is warned about and skipped rather than failing the cycle. Mirrors
+    monit-tc's excluded_build_type_ids.
+    """
+    excluded = set()
+    for pid in EXCLUDE_PROJECT_IDS:
+        params = {
+            "locator": f"affectedProject:(id:{pid})",
+            "fields": "buildType(id),nextHref",
+            "count": str(PAGE_SIZE),
+        }
+        try:
+            ids = {bt.get("id") for bt in _tc_paged("/app/rest/buildTypes", "buildType", params) if bt.get("id")}
+        except Exception as e:
+            log.warning(f"Could not resolve excluded project {pid}: {e}")
+            continue
+        log.info(f"Excluding {len(ids)} config(s) under project {pid} (including subprojects)")
+        excluded |= ids
+    return excluded
+
+
 def enumerate_candidate_configs(meta_runner_ids):
-    """All configs in the PARENT_PROJECT_ID subtree (excluding archived projects and
-    EXCLUDE_PROJECT_IDS) that have an ENABLED step whose runType (step.type) is one of the
-    monitored meta-runner ids. Keyed by build config id.
+    """All configs in the PARENT_PROJECT_ID subtree (excluding archived projects and the whole
+    subtrees, subprojects included, of EXCLUDE_PROJECT_IDS) that have an ENABLED step whose
+    runType (step.type) is one of the monitored meta-runner ids. Keyed by build config id.
     """
     meta_set = set(meta_runner_ids)
-    excluded = set(EXCLUDE_PROJECT_IDS)
+    excluded = set(EXCLUDE_PROJECT_IDS)  # direct-project fallback if subtree resolution fails
+    excluded_ids = excluded_build_type_ids()
     # Skip configs under archived projects (consistent with the other metrics). Fall back to no
     # archived-filtering on error rather than failing the whole cycle.
     try:
@@ -347,7 +373,7 @@ def enumerate_candidate_configs(meta_runner_ids):
     configs = {}
     for bt in _tc_paged("/app/rest/buildTypes", "buildType", params):
         pid = bt.get("projectId")
-        if pid in excluded or pid in archived:
+        if pid in excluded or pid in archived or bt.get("id") in excluded_ids:
             continue
         steps = (bt.get("steps") or {}).get("step", []) or []
         # step_id -> meta_runner_id, for enabled steps that ARE a monitored meta-runner.
