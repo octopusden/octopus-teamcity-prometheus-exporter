@@ -325,21 +325,18 @@ def resolve_meta_runner_ids():
     return combined
 
 
-def excluded_build_type_ids(strict=False):
+def excluded_build_type_ids():
     """Build config ids under the EXCLUDE_PROJECT_IDS subtrees (nested subprojects included).
 
     A config's direct projectId only matches the excluded project itself, so nested subprojects
     would slip through; resolving the ids via affectedProject covers the whole subtree. Mirrors
     monit-tc's excluded_build_type_ids.
 
-    A missing project (404) is ignored with a warning in both modes, so a stale or mistyped id
-    can't make strict callers skip every cycle. Any other project that fails to resolve is handled
-    per mode:
-      strict=False (default): warned about and skipped. Fine for the failed-builds metric, whose
-        gauge is cleared and rebuilt every cycle, so a gap heals on the next one.
-      strict=True: raises RuntimeError naming the project. For the status/duration/project-duration
-        gauges, which are never cleared: exporting excluded configs after a transient failure would
-        leave those series stuck, so the caller skips the cycle and keeps the previous values.
+    A missing project (404: gone, renamed or mistyped) is warned about and ignored, so a stale id
+    can't stall every cycle. Any other failure raises RuntimeError naming the project, so callers
+    skip the cycle and keep the previous values: exporting excluded configs even for one cycle
+    would bring back their series (failed-builds only runs every 24h, and the status/duration
+    gauges are never cleared).
     """
     excluded = set()
     for pid in EXCLUDE_PROJECT_IDS:
@@ -354,12 +351,9 @@ def excluded_build_type_ids(strict=False):
             if isinstance(e, requests.HTTPError) and e.response is not None and e.response.status_code == 404:
                 log.warning(f"Excluded project {pid} not found; ignoring")
                 continue
-            if strict:
-                raise RuntimeError(
-                    f"Skipping this cycle, could not resolve excluded project {pid}: {e}"
-                ) from e
-            log.warning(f"Could not resolve excluded project {pid}: {e}")
-            continue
+            raise RuntimeError(
+                f"Skipping this cycle, could not resolve excluded project {pid}: {e}"
+            ) from e
         log.info(f"Excluding {len(ids)} config(s) under project {pid} (including subprojects)")
         excluded |= ids
     return excluded
@@ -371,7 +365,6 @@ def enumerate_candidate_configs(meta_runner_ids):
     runType (step.type) is one of the monitored meta-runner ids. Keyed by build config id.
     """
     meta_set = set(meta_runner_ids)
-    excluded = set(EXCLUDE_PROJECT_IDS)  # direct-project fallback if subtree resolution fails
     excluded_ids = excluded_build_type_ids()
     # Skip configs under archived projects (consistent with the other metrics). Fall back to no
     # archived-filtering on error rather than failing the whole cycle.
@@ -388,7 +381,7 @@ def enumerate_candidate_configs(meta_runner_ids):
     configs = {}
     for bt in _tc_paged("/app/rest/buildTypes", "buildType", params):
         pid = bt.get("projectId")
-        if pid in excluded or pid in archived or bt.get("id") in excluded_ids:
+        if pid in archived or bt.get("id") in excluded_ids:
             continue
         steps = (bt.get("steps") or {}).get("step", []) or []
         # step_id -> meta_runner_id, for enabled steps that ARE a monitored meta-runner.
@@ -879,6 +872,7 @@ def get_all_build_configs(excluded_ids=None):
 
     Raises:
         requests.HTTPError: If the HTTP request to the TeamCity API fails.
+        RuntimeError: If excluded_ids is None and an excluded project can't be resolved.
     """
     log.debug("Reached get_all_build_configs")
 
@@ -973,8 +967,8 @@ def update_build_status_metrics():
 
     try:
         archived_projects = get_archived_projects()
-        # Strict: these gauges are never cleared, so skip the cycle rather than export excluded configs.
-        excluded_ids = excluded_build_type_ids(strict=True)
+        # Raises if an excluded project can't be resolved: these gauges are never cleared, so the cycle is skipped.
+        excluded_ids = excluded_build_type_ids()
 
         for template_id in TEMPLATE_IDS:
             build_configs = get_build_configs_from_template(template_id)
@@ -1018,9 +1012,9 @@ def fetch_and_update_full_metrics():
             # Inside try so a transient API error (e.g. 401/network) is caught and retried
             # next interval instead of killing this thread permanently.
             archived_projects = get_archived_projects()
-            # Resolved once per cycle and shared with the JDK metrics. Strict: these gauges are never
-            # cleared, so a resolution failure skips the whole cycle (JDK metrics included).
-            excluded_ids = excluded_build_type_ids(strict=True)
+            # Resolved once per cycle and shared with the JDK metrics. A resolution failure raises and skips
+            # the whole cycle (JDK metrics included), since these gauges are never cleared.
+            excluded_ids = excluded_build_type_ids()
             # Update JDK metrics
             update_jdk_metrics(excluded_ids)
 
