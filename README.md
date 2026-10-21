@@ -23,6 +23,7 @@ Optional:
 | `PROBE_TEMPLATE_ID`   | Template whose active build configurations the probe checks for. default `CDRelease` |
 | `PROBE_INTERVAL`      | Seconds between probes. default 900                              |
 | `PROBE_TIMEOUT`       | HTTP timeout in seconds for a probe request. default 60          |
+| `EXCLUDE_PROJECT_IDS` | Comma-separated project ids whose whole subtree, including subprojects, is excluded from all metrics |
 
 ## Logging
 
