@@ -332,7 +332,9 @@ def excluded_build_type_ids(strict=False):
     would slip through; resolving the ids via affectedProject covers the whole subtree. Mirrors
     monit-tc's excluded_build_type_ids.
 
-    A project that fails to resolve is handled per mode:
+    A missing project (404) is ignored with a warning in both modes, so a stale or mistyped id
+    can't make strict callers skip every cycle. Any other project that fails to resolve is handled
+    per mode:
       strict=False (default): warned about and skipped. Fine for the failed-builds metric, whose
         gauge is cleared and rebuilt every cycle, so a gap heals on the next one.
       strict=True: raises RuntimeError naming the project. For the status/duration/project-duration
@@ -349,6 +351,9 @@ def excluded_build_type_ids(strict=False):
         try:
             ids = {bt.get("id") for bt in _tc_paged("/app/rest/buildTypes", "buildType", params) if bt.get("id")}
         except Exception as e:
+            if isinstance(e, requests.HTTPError) and e.response is not None and e.response.status_code == 404:
+                log.warning(f"Excluded project {pid} not found; ignoring")
+                continue
             if strict:
                 raise RuntimeError(
                     f"Skipping this cycle, could not resolve excluded project {pid}: {e}"
