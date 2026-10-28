@@ -1,12 +1,14 @@
 # CLAUDE.md
 
-Guidance for Claude Code when working in this repository.
+Guidance for Claude Code when working in this repository. The terms it uses are defined in
+[CONTEXT.md](CONTEXT.md).
 
 ## What this is
 
 A Prometheus exporter that polls the TeamCity REST API and exposes build health as metrics.
 It is a single Python file, `app/main.py`, packaged as a Docker image
-(`python:3.12-slim`, port 8000). There are no tests.
+(`python:3.12-slim`, port 8000). There are no tests, and CI only builds the image: see
+"Verifying a change".
 
 ## Run locally
 
@@ -19,17 +21,39 @@ python app/main.py          # metrics on :8000/metrics
 The four variables above are required. The process raises at startup if any is missing.
 Use `LOG_FORMAT=text` for readable local logs (the default is `json`).
 
+## Verifying a change
+
+There are no automated tests, and this repo provides no TeamCity instance to test against:
+use one your token can read.
+
+```bash
+python -m py_compile app/main.py
+(cd app && python -c "import main")      # reads env and defaults; starts nothing without TeamCity
+# then run against TeamCity (see Run locally) and read what is exposed:
+curl -s localhost:8000/metrics | grep '^teamcity_'
+```
+Every loop starts immediately, but the full loop can take many minutes on a large server.
+Wait for that loop's "Sleeping for ... seconds" log line (the probe logs "Probe succeeded" or
+"Probe failed" instead) before concluding a series is missing.
+For a change to one update path, the quickest check is to call its update function with
+`_tc_get_json` mocked and read the result with `prometheus_client`'s exposition output.
+
 ## Threads (all daemon; the main thread only sleeps)
 
 | Loop | Interval env (default) | Sets |
 |---|---|---|
 | full metrics | `SCRAPE_INTERVAL` (84600) | JDK distribution, total configs, status, duration, project chain duration |
 | status | `STATUS_SCRAPE_INTERVAL` (1800) | status only |
-| known-answer probe | `PROBE_INTERVAL` (900), `PROBE_TEMPLATE_ID`, `PROBE_TIMEOUT` | `teamcity_exporter_probe_success_total` |
+| known-answer probe | `PROBE_INTERVAL` (900), `PROBE_TEMPLATE_ID` (`CDRelease`), `PROBE_TIMEOUT` (60) | `teamcity_exporter_probe_success_total` |
 | failed builds | `FAILED_BUILDS_SCRAPE_INTERVAL` (86400) | `teamcity_failed_build` |
 
 The failed-builds loop is effectively always on. `RECIPES_PROJECT_ID` falls back to
 `PARENT_PROJECT_ID`, which falls back to `JDK_PROJECT_ID`.
+
+**Set `PROBE_TEMPLATE_ID` for every deployment.** The default `CDRelease` is one specific
+template; on a server without it the probe never succeeds, and that looks exactly like
+stale data. The probe also goes through the HTTP retries (`REQUEST_RETRIES`), so with the
+defaults one probe can take about 3 × `PROBE_TIMEOUT` (about 3 minutes) before it fails.
 
 Other env vars:
 - HTTP: `REQUEST_TIMEOUT` (600), `REQUEST_RETRIES` (2; retries on timeout/connection only),
@@ -81,8 +105,10 @@ Gotchas:
     an active config, even one under an excluded subtree.
   - An excluded project id that returns 404 (gone, renamed or mistyped) is logged and
     ignored. The cycle continues without it.
-- Values change only when a loop completes (every 900s to 86400s by default), so don't rely
-  on sub-minute freshness.
+- Loops update metrics while they collect, then sleep for their interval (900s to 86400s by
+  default). So a scrape in the middle of a cycle can see a mix of old and new values, and a
+  cleared gauge is briefly empty: `teamcity_jdk_build_configurations` has no series while the
+  JDK versions are being fetched. Don't rely on sub-minute freshness or on a cycle being atomic.
 
 ## CI / release
 
