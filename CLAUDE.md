@@ -39,9 +39,9 @@ Other env vars:
   `BUILD_STEP_PATTERNS` ("Build & Publish,Publish").
 - Chain duration: `START_PROJECT_CHAIN`, `STOP_PROJECT_CHAIN`.
 
-Deployments usually override the defaults; for example, the failed-builds loop typically
-runs far more often than its 86400s default. All are defined near the top of `app/main.py`. Read them there rather than trusting
-README.md, which is partly out of date.
+Every default can be overridden through the environment, so check the deployment's values
+before reasoning about timing. All are defined near the top of `app/main.py`. Read them there
+rather than trusting README.md, which is partly out of date.
 
 ## Metrics are a public contract
 
@@ -56,17 +56,33 @@ PR and the release notes.
 | `teamcity_project_duration_seconds` | projectId, project_url, project_name, finished_number | chain duration |
 | `teamcity_total_build_configurations` | — | count |
 | `teamcity_jdk_build_configurations` | jdk_version | count per `env.JAVA_HOME` value (or a sentinel such as `not_set`) |
-| `teamcity_failed_build` | build_type_id, build_type_name, project_name, branch, build_url, meta_runner_ids | 1 per currently failing (config, branch); cleared every cycle |
+| `teamcity_failed_build` | build_type_id, build_type_name, project_name, branch, build_url, meta_runner_ids | 1 per currently failing (config, branch); replaced on each completed cycle (see below) |
 | `teamcity_exporter_probe_success_total` | — | counter; stops increasing when the exporter can't get correct answers from TeamCity |
 
 Gotchas:
-- Gauges other than `teamcity_failed_build` are never cleared, so removed configs keep their
-  last value until restart.
+- Which gauges are cleared:
+  - `teamcity_failed_build` is cleared and rebuilt only when a failed-builds cycle gets past
+    candidate enumeration and the recovery checks. A cycle that is skipped (no meta-runner
+    ids resolved) or that raises before that point keeps the previous series.
+  - `teamcity_jdk_build_configurations` is cleared and rebuilt in each full cycle that
+    fetches the config list, so a JDK version that disappears drops out.
+    `teamcity_total_build_configurations` is recomputed in the same step.
+  - `teamcity_last_build_status`, `teamcity_last_build_duration_seconds` and
+    `teamcity_project_duration_seconds` are never cleared: removed configs keep their last
+    value until restart.
 - `finished_number` makes `teamcity_project_duration_seconds` grow one series per chain run.
-- Archived projects and `EXCLUDE_PROJECT_IDS` subtrees are skipped by every metric. If
-  exclusion resolution fails, the whole cycle is skipped, so excluded series never leak in.
-- Consumers scrape this exporter infrequently and the loops are slow, so don't rely on
-  sub-minute freshness.
+- Archived projects and `EXCLUDE_PROJECT_IDS` subtrees, by update path:
+  - Status, duration, project duration and JDK metrics: both are filtered. If the archived
+    or excluded lookup fails, the whole cycle is skipped and the previous values stay.
+  - Failed builds: the excluded subtree is filtered, and a failure to resolve it skips the
+    cycle. If the archived-projects lookup fails, that cycle runs **without** archived
+    filtering.
+  - Known-answer probe: no filtering. It counts a success whenever `PROBE_TEMPLATE_ID` has
+    an active config, even one under an excluded subtree.
+  - An excluded project id that returns 404 (gone, renamed or mistyped) is logged and
+    ignored. The cycle continues without it.
+- Values change only when a loop completes (every 900s to 86400s by default), so don't rely
+  on sub-minute freshness.
 
 ## CI / release
 
