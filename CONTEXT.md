@@ -30,7 +30,7 @@ _Avoid_: pipeline, build chain (alone)
 
 **Failed build**:
 A build configuration and branch pair whose latest build failed at a monitored meta-runner
-step, within the time window. It stops being a failed build once a newer build on that
+step or monitored step name, within the time window. It stops being a failed build once a newer build on that
 branch succeeds.
 _Avoid_: red build, broken build, failing config
 
