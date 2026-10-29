@@ -10,28 +10,33 @@ One TeamCity job definition. Every metric about builds is about one build config
 _Avoid_: build type (the API's name for it), job, config (alone, in prose)
 
 **Template**:
-A TeamCity template that build configurations inherit from. The exporter only reports on
-build configurations of the templates it is told to watch.
+A TeamCity template that build configurations inherit from. Only the status and duration
+metrics are limited to the watched templates. The JDK and total-configuration metrics cover
+a whole project subtree, and failed builds cover a project subtree selected by monitored
+steps, whatever the template.
 _Avoid_: base configuration, parent
 
 **Meta-runner**:
-A reusable build step type shared by many build configurations. A failed build is reported
-only when it failed at a monitored meta-runner step, or at a step whose name is monitored.
+A reusable build step type shared by many build configurations. A failed build is labelled
+with the meta-runner step that failed.
 _Avoid_: recipe (TeamCity's newer name for the same thing; use it only when naming that API),
 plugin
 
 **Project chain**:
-A chain of dependent builds that begins at a build of a start template and ends at a build
-of a stop template. Its duration is measured from the first start to the last finish, and
-reported under the project of the last build.
+The upstream dependency builds of a successful build of a stop template. Its duration runs
+from the start of the first upstream build that belongs to a start template, in the order
+TeamCity lists them (not necessarily the earliest start), to the finish of the stop-template
+build. It is reported under the stop-template build's project.
 _Avoid_: pipeline, build chain (alone)
 
 ## What the exporter reports
 
 **Failed build**:
-A build configuration and branch pair whose latest build failed at a monitored meta-runner
-step or monitored step name, within the time window. It stops being a failed build once a newer build on that
-branch succeeds.
+A build configuration and branch pair that failed within the time window, whose latest
+build on that branch still has status FAILURE, at a monitored meta-runner step or monitored
+step name. It stops being a failed build as soon as the latest build has any other status.
+If TeamCity can't answer which build is latest or which step failed, the pair is kept as a
+failed build labelled `<attribution-error>`, without a confirmed monitored-step failure.
 _Avoid_: red build, broken build, failing config
 
 **Excluded subtree**:

@@ -94,6 +94,9 @@ Gotchas:
   - `teamcity_last_build_status`, `teamcity_last_build_duration_seconds` and
     `teamcity_project_duration_seconds` are never cleared: removed configs keep their last
     value until restart.
+- `meta_runner_ids="<attribution-error>"` on `teamcity_failed_build` means a TeamCity lookup
+  failed during the recovery or step check. The series is kept (value 1) but the failure is
+  not confirmed to be at a monitored step.
 - `finished_number` makes `teamcity_project_duration_seconds` grow one series per chain run.
 - Archived projects and `EXCLUDE_PROJECT_IDS` subtrees, by update path:
   - Status, duration, project duration and JDK metrics: both are filtered. If the archived
